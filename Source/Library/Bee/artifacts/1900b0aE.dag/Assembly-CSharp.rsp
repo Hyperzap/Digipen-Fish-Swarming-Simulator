@@ -457,8 +457,11 @@
 -analyzer:"C:/Program Files/Unity/Hub/Editor/6000.3.18f1/Editor/Data/Tools/BuildPipeline/Unity.SourceGenerators/Unity.SourceGenerators.dll"
 -analyzer:"C:/Program Files/Unity/Hub/Editor/6000.3.18f1/Editor/Data/Tools/BuildPipeline/Unity.SourceGenerators/Unity.UIToolkit.SourceGenerator.dll"
 "Assets/Scripts/Core/CameraOrbit.cs"
+"Assets/Scripts/Core/FishConfig.cs"
+"Assets/Scripts/Core/FishManager.cs"
 "Assets/Scripts/Core/OceanBounds.cs"
-"Assets/TutorialInfo/Scripts/Readme.cs"
+"Assets/Scripts/Flocking/BoidSteering.cs"
+"Assets/Scripts/Flocking/BoundarySteering.cs"
 -langversion:9.0
 /deterministic
 /optimize+
