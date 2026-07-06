@@ -11,16 +11,28 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30023, type: 3}
   m_Name: FishConfig
-  m_EditorClassIdentifier:
+  m_EditorClassIdentifier: 
   perceptionRadius: 6
   separationRadius: 2
   separationWeight: 1.6
   alignmentWeight: 1
   cohesionWeight: 1
   boundaryWeight: 2
-  cohesionAxisWeights: {x: 1, y: 3, z: 0.6}
-  maxSpeed: 6
+  cohesionAxisWeights: {x: 1, y: 0.7, z: 0.75}
+  maxSpeed: 8
   minSpeed: 2
   maxSteerForce: 8
-  boundaryMargin: 10
+  boundaryMargin: 5
   maxNeighbors: 32
+  predatorFleeRadius: 16
+  threatWeight: 5
+  regroupNeighborDistance: 4
+  foragingNodeRadius: 8
+  foragingChancePerTick: 0.02
+  foragingDuration: 4
+  foragingWeight: 1.5
+  behaviorTickBuckets: 10
+  schoolingSAC: {x: 1, y: 1, z: 1}
+  fleeingSAC: {x: 1.5, y: 0.5, z: 0.2}
+  regroupingSAC: {x: 1, y: 1.2, z: 2}
+  foragingSAC: {x: 1, y: 0.5, z: 0.3}

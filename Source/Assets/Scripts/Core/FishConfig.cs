@@ -1,4 +1,5 @@
 using UnityEngine;
+using FishSwarm.Behavior;
 
 namespace FishSwarm.Core
 {
@@ -25,12 +26,14 @@ namespace FishSwarm.Core
 
         [Header("School shape")]
         [Tooltip("Per-axis cohesion stiffness. Equilibrium extent runs roughly as 1/weight, so a " +
-                 "non-uniform vector makes the school ellipsoidal instead of spherical. " +
-                 "e.g. (1, 3, 0.6) => vertical extent ~1/3 of width, and ~1.6x longer along Z.")]
-        public Vector3 cohesionAxisWeights = new Vector3(1f, 3f, 0.6f);
+                 "non-uniform vector makes the school ellipsoidal instead of spherical. Lower Y = " +
+                 "taller school; higher Y = flatter. NOTE: the FishConfig *asset* overrides this " +
+                 "default, so edit the asset (or this, if using CreateDefault). " +
+                 "e.g. (1, 1.3, 0.75) => a gently flattened, slightly elongated school with height.")]
+        public Vector3 cohesionAxisWeights = new Vector3(1f, 1.3f, 0.75f);
 
         [Header("Movement")]
-        public float maxSpeed = 6f;
+        public float maxSpeed = 8f;
         [Tooltip("Fish never drop below this speed, so the school always looks alive.")]
         public float minSpeed = 2f;
         [Tooltip("Maximum magnitude of any single steering force (Reynolds clamp).")]
@@ -46,6 +49,51 @@ namespace FishSwarm.Core
                  "returns the nearest ones; naive keeps its full O(n²) scan so the benchmark " +
                  "contrast stays honest.")]
         [Min(1)] public int maxNeighbors = 32;
+
+        [Header("Predator response")]
+        [Tooltip("Fish flee when a predator is within this distance.")]
+        public float predatorFleeRadius = 16f;
+        [Tooltip("Strength of the threat repulsion. Kept well above the S/A/C weights so it wins.")]
+        public float threatWeight = 5f;
+
+        [Header("Regrouping")]
+        [Tooltip("A Regrouping fish returns to Schooling once its nearest neighbour is this close.")]
+        public float regroupNeighborDistance = 4f;
+
+        [Header("Foraging")]
+        [Tooltip("Distance within which a fish counts as 'near' a foraging node.")]
+        public float foragingNodeRadius = 8f;
+        [Tooltip("Per-tick chance an unthreatened fish near a node starts foraging.")]
+        [Range(0f, 1f)] public float foragingChancePerTick = 0.02f;
+        [Tooltip("How long a fish forages before returning to the school (seconds).")]
+        public float foragingDuration = 4f;
+        [Tooltip("Strength of the pull toward the foraging node while foraging.")]
+        public float foragingWeight = 1.5f;
+
+        [Header("Behaviour tick")]
+        [Tooltip("Fish re-evaluate their state every N frames, staggered by index (spreads the FSM " +
+                 "cost and gives ~5–10 Hz updates). Higher = cheaper but laggier reactions.")]
+        [Min(1)] public int behaviorTickBuckets = 10;
+
+        [Header("Per-state steering multipliers (x=separation, y=alignment, z=cohesion)")]
+        public Vector3 schoolingSAC = new Vector3(1f, 1f, 1f);
+        [Tooltip("Low cohesion here is what lets the school break apart around a predator.")]
+        public Vector3 fleeingSAC = new Vector3(1.5f, 0.5f, 0.2f);
+        [Tooltip("High cohesion here is what pulls the scattered fish back together.")]
+        public Vector3 regroupingSAC = new Vector3(1f, 1.2f, 2f);
+        public Vector3 foragingSAC = new Vector3(1f, 0.5f, 0.3f);
+
+        /// <summary>Per-state separation/alignment/cohesion multipliers.</summary>
+        public Vector3 SacFor(FishState state)
+        {
+            switch (state)
+            {
+                case FishState.Fleeing: return fleeingSAC;
+                case FishState.Regrouping: return regroupingSAC;
+                case FishState.Foraging: return foragingSAC;
+                default: return schoolingSAC;
+            }
+        }
 
         /// <summary>A runtime default instance used when no config asset is wired up.</summary>
         public static FishConfig CreateDefault() => CreateInstance<FishConfig>();

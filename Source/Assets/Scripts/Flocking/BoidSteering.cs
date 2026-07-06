@@ -16,12 +16,16 @@ namespace FishSwarm.Flocking
         /// Accumulated steering acceleration for fish <paramref name="index"/> given its
         /// neighbours. Reads current positions/velocities only — the caller integrates.
         /// </summary>
+        /// <param name="sacMul">Per-state multipliers for (separation, alignment, cohesion), so the
+        /// behaviour layer can, for example, drop cohesion while fleeing without touching the base
+        /// weights on the config.</param>
         public static Vector3 Compute(
             int index,
             Vector3[] positions,
             Vector3[] velocities,
             List<int> neighbors,
-            FishConfig cfg)
+            FishConfig cfg,
+            Vector3 sacMul)
         {
             Vector3 pos = positions[index];
             Vector3 vel = velocities[index];
@@ -56,7 +60,7 @@ namespace FishSwarm.Flocking
             if (flockCount > 0)
             {
                 Vector3 avgVelocity = alignmentSum / flockCount;
-                force += Steer(avgVelocity, vel, cfg) * cfg.alignmentWeight;
+                force += Steer(avgVelocity, vel, cfg) * (cfg.alignmentWeight * sacMul.y);
 
                 // Anisotropic cohesion. We steer toward the centroid the usual (Reynolds) way,
                 // then scale the resulting force PER AXIS. Scaling the force *magnitude* — rather
@@ -68,11 +72,11 @@ namespace FishSwarm.Flocking
                 Vector3 toCentre = (cohesionSum / flockCount) - pos;
                 Vector3 cohesionForce = Steer(toCentre, vel, cfg);
                 cohesionForce.Scale(cfg.cohesionAxisWeights);
-                force += cohesionForce * cfg.cohesionWeight;
+                force += cohesionForce * (cfg.cohesionWeight * sacMul.z);
             }
 
             if (separation.sqrMagnitude > 1e-8f)
-                force += Steer(separation, vel, cfg) * cfg.separationWeight;
+                force += Steer(separation, vel, cfg) * (cfg.separationWeight * sacMul.x);
 
             return force;
         }

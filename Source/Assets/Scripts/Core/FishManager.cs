@@ -3,27 +3,33 @@ using UnityEngine;
 using UnityEngine.InputSystem;
 using FishSwarm.Flocking;
 using FishSwarm.Spatial;
+using FishSwarm.Behavior;
+using FishSwarm.Predators;
 using Stopwatch = System.Diagnostics.Stopwatch;
 
 namespace FishSwarm.Core
 {
     /// <summary>
-    /// Owns the whole school as struct-of-arrays data (positions/velocities) and steps every
+    /// Owns the whole school as struct-of-arrays data (positions/velocities/state) and steps every
     /// fish in one central loop. This data-oriented layout — rather than one MonoBehaviour per
     /// fish — is what ports cleanly to Burst <c>IJobParallelFor</c> + <c>NativeArray</c> in the
     /// scale-up pass: only the loop body moves into a job.
     ///
     /// Neighbour lookups go through a pluggable <see cref="INeighborProvider"/> so the same live
-    /// population can flip between the naive O(n²) scan and the spatial grid at runtime. The cost
-    /// of just the neighbour work (grid build + all queries) is timed with a <see cref="Stopwatch"/>
-    /// and exposed for the benchmark overlay, isolated from steering and render cost.
+    /// population can flip between the naive O(n²) scan and the spatial grid at runtime, with the
+    /// lookup cost isolated by a <see cref="Stopwatch"/> for the benchmark.
     ///
-    /// Fish are drawn with GPU instancing (<see cref="Graphics.RenderMeshInstanced"/>) straight
-    /// from a per-frame matrix array — no per-fish GameObject or Transform — so thousands of fish
-    /// cost only a handful of instanced draw calls.
+    /// Behaviour: a threat force pushes fish away from predators every frame (the split emerges
+    /// from near-vs-far fish reacting differently), while a low-frequency, staggered state machine
+    /// (Schooling/Fleeing/Regrouping/Foraging) modulates the cohesion weights and colours the fish.
+    ///
+    /// Fish are drawn with GPU instancing, bucketed by state so each state gets its own colour in a
+    /// few instanced draw calls — no per-fish GameObject or Transform.
     /// </summary>
     public class FishManager : MonoBehaviour
     {
+        const int StateCount = 4;
+
         [Header("References (auto-resolved if left empty)")]
         [Tooltip("Shared steering parameters. A runtime default is used if none is assigned.")]
         public FishConfig config;
@@ -45,8 +51,15 @@ namespace FishSwarm.Core
         public Material fishMaterial;
         [Tooltip("Fallback shader if no material asset is assigned (editor convenience only).")]
         public Shader fishShader;
-        public Color fishColor = new Color(0.8f, 0.85f, 0.55f, 1f);
         public Vector3 fishScale = new Vector3(0.25f, 0.25f, 0.7f);
+        [Tooltip("Colour per state: 0 Schooling, 1 Fleeing, 2 Regrouping, 3 Foraging.")]
+        public Color[] stateColors =
+        {
+            new Color(0.80f, 0.85f, 0.55f), // Schooling
+            new Color(0.90f, 0.20f, 0.15f), // Fleeing
+            new Color(0.20f, 0.60f, 0.95f), // Regrouping
+            new Color(0.30f, 0.85f, 0.35f), // Foraging
+        };
 
         [Header("Neighbour lookup")]
         [Tooltip("Start with the spatial grid (fast). Toggle to naive at runtime to see the cost.")]
@@ -60,13 +73,22 @@ namespace FishSwarm.Core
         Vector3[] _positions;
         Vector3[] _velocities;
         Vector3[] _accelerations;
-        Matrix4x4[] _matrices; // per-fish TRS, rebuilt each frame for instanced rendering
+        FishState[] _states;
+        float[] _stateTimer;         // time spent in the current state (for foraging duration)
+        float[] _nearestNeighborSqr; // per-frame, for the Regrouping -> Schooling test
+        bool[] _predatorInRange;     // per-frame, for the -> Fleeing trigger
         int _count;
 
         // Reused per-fish neighbour scratch buffer (no per-frame allocation).
         readonly List<int> _neighbors = new List<int>(256);
 
-        // Pluggable neighbour lookup + isolated timing of just that work.
+        // Predator / foraging-node positions snapshotted each frame.
+        Vector3[] _predatorPositions = new Vector3[8];
+        int _predatorCount;
+        Vector3[] _nodePositions = new Vector3[8];
+        int _nodeCount;
+
+        // Pluggable neighbour lookup + isolated timing.
         NaiveNeighborProvider _naive;
         UniformGridNeighborProvider _grid;
         INeighborProvider _active;
@@ -75,19 +97,16 @@ namespace FishSwarm.Core
         double _lastQueryMs;
         double _lastSimMs;
 
+        // Per-state instanced rendering.
         Mesh _fishMesh;
-        Material _fishMaterial;
-        RenderParams _renderParams;
+        Material[] _stateMaterials;
+        RenderParams[] _stateRenderParams;
+        Matrix4x4[][] _stateMatrices; // [state][instance]
+        int[] _stateCounts;
 
         public int Count => _count;
-
-        /// <summary>Name of the active neighbour-lookup mode (for the benchmark overlay).</summary>
         public string ActiveModeName => _active != null ? _active.Name : "-";
-
-        /// <summary>Milliseconds spent on neighbour lookup last frame (grid build + all queries).</summary>
         public double LastNeighborQueryMs => _lastQueryMs;
-
-        /// <summary>Milliseconds of CPU simulation last frame (query + steering + integration).</summary>
         public double LastSimMs => _lastSimMs;
 
         /// <summary>Flip between the naive and grid providers on the live population.</summary>
@@ -124,32 +143,45 @@ namespace FishSwarm.Core
             _fishMesh = temp.GetComponent<MeshFilter>().sharedMesh;
             Destroy(temp);
 
-            // Prefer a real material asset: it's what keeps the GPU-instancing shader variant in
-            // the build. Clone it so we can tint per fishColor without dirtying the shared asset.
-            if (fishMaterial != null)
-            {
-                _fishMaterial = new Material(fishMaterial);
-            }
-            else
+            // Prefer a real material asset: it's what keeps the GPU-instancing shader variant in the
+            // build. We clone one tinted material per state so states are colour-coded on screen.
+            Material baseMat = fishMaterial;
+            bool tempBase = false;
+            if (baseMat == null)
             {
                 Shader shader = fishShader != null ? fishShader : Shader.Find("Universal Render Pipeline/Lit");
                 if (shader == null) shader = Shader.Find("Standard");
                 if (shader == null)
                     Debug.LogError("[FishManager] No fish material/shader found; fish will be invisible.");
-                _fishMaterial = new Material(shader);
+                baseMat = new Material(shader);
+                tempBase = true;
             }
-            _fishMaterial.color = fishColor;
-            _fishMaterial.enableInstancing = true;
 
-            // worldBounds must cover where fish can be, or the instanced batches get frustum-culled
-            // as a whole. Grow the ocean volume by a margin to be safe.
             Bounds b = bounds.Bounds;
-            _renderParams = new RenderParams(_fishMaterial)
+            var worldBounds = new Bounds(b.center, b.size + Vector3.one * 10f);
+
+            _stateMaterials = new Material[StateCount];
+            _stateRenderParams = new RenderParams[StateCount];
+            for (int s = 0; s < StateCount; s++)
             {
-                worldBounds = new Bounds(b.center, b.size + Vector3.one * 10f),
-                shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off,
-                receiveShadows = false,
-            };
+                var m = new Material(baseMat) { color = ColorForState(s) };
+                m.enableInstancing = true;
+                _stateMaterials[s] = m;
+                _stateRenderParams[s] = new RenderParams(m)
+                {
+                    worldBounds = worldBounds,
+                    shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off,
+                    receiveShadows = false,
+                };
+            }
+
+            if (tempBase) Destroy(baseMat);
+        }
+
+        Color ColorForState(int s)
+        {
+            if (stateColors != null && s < stateColors.Length) return stateColors[s];
+            return Color.white;
         }
 
         void Spawn(int n)
@@ -158,7 +190,15 @@ namespace FishSwarm.Core
             _positions = new Vector3[_count];
             _velocities = new Vector3[_count];
             _accelerations = new Vector3[_count];
-            _matrices = new Matrix4x4[_count];
+            _states = new FishState[_count];
+            _stateTimer = new float[_count];
+            _nearestNeighborSqr = new float[_count];
+            _predatorInRange = new bool[_count];
+
+            _stateMatrices = new Matrix4x4[StateCount][];
+            _stateCounts = new int[StateCount];
+            for (int s = 0; s < StateCount; s++)
+                _stateMatrices[s] = new Matrix4x4[_count];
 
             Random.State prev = Random.state;
             if (randomSeed != 0) Random.InitState(randomSeed);
@@ -171,8 +211,7 @@ namespace FishSwarm.Core
                     ? bounds.Clamp(centre + Random.insideUnitSphere * spawnRadius)
                     : bounds.RandomPointInside();
                 _velocities[i] = Random.onUnitSphere * startSpeed;
-                _matrices[i] = Matrix4x4.TRS(
-                    _positions[i], Quaternion.LookRotation(_velocities[i], Vector3.up), fishScale);
+                _states[i] = FishState.Schooling;
             }
 
             Random.state = prev;
@@ -183,38 +222,50 @@ namespace FishSwarm.Core
             if (_count == 0) return;
 
             HandleInput();
+            SnapshotThreatsAndNodes();
 
             float dt = Time.deltaTime;
             Bounds volume = bounds.Bounds;
 
-            // Time the whole CPU simulation (neighbour lookup + steering + integration), so the
-            // overlay can separate CPU cost from the GPU/present time that makes up the rest of
-            // the frame. The render submit below is deliberately outside this timer.
+            // Time the whole CPU simulation so the overlay can separate it from GPU/present time.
             _simTimer.Restart();
 
-            // Build the neighbour acceleration structure for this frame (timed).
             _queryTimer.Reset();
             _queryTimer.Start();
             _active.Build(_positions, _count, config.perceptionRadius, config.maxNeighbors);
             _queryTimer.Stop();
 
-            // Pass 1 — accumulate accelerations from a snapshot of current positions/velocities,
-            // so no fish sees another's half-updated state this frame. Only the neighbour query is
-            // timed; the steering maths is deliberately outside the stopwatch so the benchmark
-            // isolates lookup cost from everything else.
+            // Pass 1 — accumulate accelerations from a snapshot of current state. Only the neighbour
+            // query is inside the query stopwatch; steering maths stays outside it.
             for (int i = 0; i < _count; i++)
             {
                 _queryTimer.Start();
                 _active.Query(i, _neighbors);
                 _queryTimer.Stop();
 
-                Vector3 accel = BoidSteering.Compute(i, _positions, _velocities, _neighbors, config);
-                accel += BoundarySteering.Compute(_positions[i], _velocities[i], volume, config);
+                Vector3 pos = _positions[i];
+                Vector3 vel = _velocities[i];
+
+                Vector3 accel = BoidSteering.Compute(i, _positions, _velocities, _neighbors, config, config.SacFor(_states[i]));
+                accel += BoundarySteering.Compute(pos, vel, volume, config);
+                accel += ThreatSteering.Compute(pos, vel, _predatorPositions, _predatorCount, config, out bool inRange);
+
+                _predatorInRange[i] = inRange;
+                _nearestNeighborSqr[i] = NearestNeighborSqr(i);
+
+                if (_states[i] == FishState.Foraging)
+                    accel += ForagingPull(pos, vel);
+
                 _accelerations[i] = accel;
             }
             _lastQueryMs = _queryTimer.Elapsed.TotalMilliseconds;
 
-            // Pass 2 — integrate, clamp speed, and rebuild each fish's render matrix.
+            // Low-frequency, staggered state machine.
+            TickBehaviors(dt);
+
+            // Pass 2 — integrate, clamp speed, and bucket each fish's matrix by state for rendering.
+            for (int s = 0; s < StateCount; s++) _stateCounts[s] = 0;
+
             float maxSpeed = config.maxSpeed;
             float minSpeed = config.minSpeed;
             for (int i = 0; i < _count; i++)
@@ -234,8 +285,10 @@ namespace FishSwarm.Core
 
                 _velocities[i] = v;
                 _positions[i] += v * dt;
-                _matrices[i] = Matrix4x4.TRS(
-                    _positions[i], Quaternion.LookRotation(v, Vector3.up), fishScale);
+
+                int s = (int)_states[i];
+                _stateMatrices[s][_stateCounts[s]++] =
+                    Matrix4x4.TRS(_positions[i], Quaternion.LookRotation(v, Vector3.up), fishScale);
             }
 
             _simTimer.Stop();
@@ -244,17 +297,97 @@ namespace FishSwarm.Core
             RenderFish();
         }
 
-        /// <summary>
-        /// Draw all fish with GPU instancing. RenderMeshInstanced takes up to 1023 instances per
-        /// call, so large populations are issued in a few batches straight from the matrix array.
-        /// </summary>
+        /// <summary>Snapshot predator and foraging-node positions into flat arrays for this frame.</summary>
+        void SnapshotThreatsAndNodes()
+        {
+            var preds = Predator.All;
+            _predatorCount = preds.Count;
+            if (_predatorPositions.Length < _predatorCount)
+                _predatorPositions = new Vector3[Mathf.NextPowerOfTwo(_predatorCount)];
+            for (int i = 0; i < _predatorCount; i++)
+                _predatorPositions[i] = preds[i].transform.position;
+
+            var nodes = ForagingNode.All;
+            _nodeCount = nodes.Count;
+            if (_nodePositions.Length < _nodeCount)
+                _nodePositions = new Vector3[Mathf.NextPowerOfTwo(_nodeCount)];
+            for (int i = 0; i < _nodeCount; i++)
+                _nodePositions[i] = nodes[i].transform.position;
+        }
+
+        float NearestNeighborSqr(int index)
+        {
+            Vector3 p = _positions[index];
+            float best = float.MaxValue;
+            for (int n = 0; n < _neighbors.Count; n++)
+            {
+                float d2 = (_positions[_neighbors[n]] - p).sqrMagnitude;
+                if (d2 < best) best = d2;
+            }
+            return best;
+        }
+
+        Vector3 ForagingPull(Vector3 pos, Vector3 vel)
+        {
+            int nearest = NearestNodeInRange(pos);
+            if (nearest < 0) return Vector3.zero;
+            Vector3 desiredDir = _nodePositions[nearest] - pos;
+            if (desiredDir.sqrMagnitude < 1e-6f) return Vector3.zero;
+            Vector3 desired = desiredDir.normalized * config.maxSpeed;
+            return Vector3.ClampMagnitude(desired - vel, config.maxSteerForce) * config.foragingWeight;
+        }
+
+        int NearestNodeInRange(Vector3 pos)
+        {
+            float r2 = config.foragingNodeRadius * config.foragingNodeRadius;
+            int nearest = -1;
+            float best = r2;
+            for (int i = 0; i < _nodeCount; i++)
+            {
+                float d2 = (_nodePositions[i] - pos).sqrMagnitude;
+                if (d2 < best) { best = d2; nearest = i; }
+            }
+            return nearest;
+        }
+
+        void TickBehaviors(float dt)
+        {
+            int buckets = Mathf.Max(1, config.behaviorTickBuckets);
+            int bucket = Time.frameCount % buckets;
+            float tickDt = dt * buckets; // approx real time between a fish's ticks
+
+            for (int i = bucket; i < _count; i += buckets)
+            {
+                bool nearNode = NearestNodeInRange(_positions[i]) >= 0;
+                float nnDist = Mathf.Sqrt(_nearestNeighborSqr[i]);
+                _states[i] = FishBehaviorController.Tick(
+                    _states[i],
+                    _predatorInRange[i],
+                    nnDist,
+                    nearNode,
+                    Random.value,
+                    config.regroupNeighborDistance,
+                    config.foragingChancePerTick,
+                    config.foragingDuration,
+                    tickDt,
+                    ref _stateTimer[i]);
+            }
+        }
+
+        /// <summary>Draw each state's fish in its own colour, batched by the 1023-instance limit.</summary>
         void RenderFish()
         {
             const int kBatch = 1023;
-            for (int start = 0; start < _count; start += kBatch)
+            for (int s = 0; s < StateCount; s++)
             {
-                int cnt = Mathf.Min(kBatch, _count - start);
-                Graphics.RenderMeshInstanced(_renderParams, _fishMesh, 0, _matrices, cnt, start);
+                int total = _stateCounts[s];
+                Matrix4x4[] mats = _stateMatrices[s];
+                RenderParams rp = _stateRenderParams[s];
+                for (int start = 0; start < total; start += kBatch)
+                {
+                    int cnt = Mathf.Min(kBatch, total - start);
+                    Graphics.RenderMeshInstanced(rp, _fishMesh, 0, mats, cnt, start);
+                }
             }
         }
 
@@ -291,7 +424,9 @@ namespace FishSwarm.Core
 
         void OnDestroy()
         {
-            if (_fishMaterial != null) Destroy(_fishMaterial);
+            if (_stateMaterials != null)
+                foreach (var m in _stateMaterials)
+                    if (m != null) Destroy(m);
         }
     }
 }
