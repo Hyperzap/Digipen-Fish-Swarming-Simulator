@@ -40,6 +40,13 @@ namespace FishSwarm.Core
         [Tooltip("Distance from a volume face at which fish begin steering back inward.")]
         public float boundaryMargin = 6f;
 
+        [Header("Performance")]
+        [Tooltip("Max neighbours each fish considers. Boids only need a handful, so capping this " +
+                 "bounds per-fish cost in dense schools (and lets the grid early-exit). The grid " +
+                 "returns the nearest ones; naive keeps its full O(n²) scan so the benchmark " +
+                 "contrast stays honest.")]
+        [Min(1)] public int maxNeighbors = 32;
+
         /// <summary>A runtime default instance used when no config asset is wired up.</summary>
         public static FishConfig CreateDefault() => CreateInstance<FishConfig>();
     }
