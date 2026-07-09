@@ -1,11 +1,10 @@
+using FishSwarm.FSM;
+
 namespace FishSwarm.Behavior
 {
     /// <summary>
-    /// Lightweight per-fish state machine, evaluated at low frequency (staggered across the school
-    /// by the FishManager, ~5–10 Hz). It decides only the <see cref="FishState"/>; the steering
-    /// weights each state implies live on the FishConfig, and the actual split/reform emerges from
-    /// those weights plus the threat force. Kept as a pure static function (no Unity types) so it
-    /// stays trivially testable and allocation-free.
+    /// Compatibility wrapper for callers that still use the old behaviour controller name.
+    /// The finite state machine logic lives in <see cref="FiniteStateMachine"/>.
     /// </summary>
     public static class FishBehaviorController
     {
@@ -21,48 +20,22 @@ namespace FishSwarm.Behavior
             float tickDt,
             ref float stateTimer)
         {
-            // A predator in range always wins: flee immediately, whatever the current state.
-            if (predatorInRange)
+            var input = new FishStateInputs
             {
-                if (current != FishState.Fleeing) stateTimer = 0f;
-                return FishState.Fleeing;
-            }
+                PredatorInRange = predatorInRange ? (byte)1 : (byte)0,
+                NearestNeighborDistance = nearestNeighborDistance,
+                NearForagingNode = nearForagingNode ? (byte)1 : (byte)0,
+                RandomValue = rng,
+            };
 
-            switch (current)
+            var settings = new FishStateSettings
             {
-                case FishState.Fleeing:
-                    // Predator gone — pull back toward the school.
-                    stateTimer = 0f;
-                    return FishState.Regrouping;
+                RegroupNeighborDistance = regroupNeighborDistance,
+                ForagingChance = foragingChance,
+                ForagingDuration = foragingDuration,
+            };
 
-                case FishState.Regrouping:
-                    // Considered rejoined once a neighbour is close again.
-                    if (nearestNeighborDistance < regroupNeighborDistance)
-                    {
-                        stateTimer = 0f;
-                        return FishState.Schooling;
-                    }
-                    return FishState.Regrouping;
-
-                case FishState.Foraging:
-                    stateTimer += tickDt;
-                    if (stateTimer > foragingDuration || !nearForagingNode)
-                    {
-                        stateTimer = 0f;
-                        return FishState.Schooling;
-                    }
-                    return FishState.Foraging;
-
-                case FishState.Schooling:
-                default:
-                    // Unthreatened and near a feeding spot — occasionally break off to forage.
-                    if (nearForagingNode && rng < foragingChance)
-                    {
-                        stateTimer = 0f;
-                        return FishState.Foraging;
-                    }
-                    return FishState.Schooling;
-            }
+            return FiniteStateMachine.Tick(current, input, settings, tickDt, ref stateTimer);
         }
     }
 }

@@ -1,6 +1,7 @@
 using Unity.Collections;
 using Unity.Mathematics;
 using FishSwarm.Behavior;
+using FishSwarm.FSM;
 using Random = Unity.Mathematics.Random;
 
 namespace FishSwarm.Jobs
@@ -41,16 +42,23 @@ namespace FishSwarm.Jobs
             public float nearestSqr;
         }
 
-        static bool AddNeighbor(ref Accum a, float3 myPos, int j,
+        static bool AddNeighbor(ref Accum a, float3 myPos, float3 forward, int j,
             in NativeArray<float3> pos, in NativeArray<float3> vel,
-            float perSqr, float sepSqr, int maxN)
+            float perSqr, float sepSqr, int maxN, in SteeringParams p)
         {
             float3 off = myPos - pos[j];
             float d2 = math.lengthsq(off);
             if (d2 < perSqr && d2 > 1e-6f)
             {
-                if (d2 < a.nearestSqr) a.nearestSqr = d2;
+                // Collision spacing is omnidirectional: even fish behind us should still push away.
                 if (d2 < sepSqr) a.sep += off / d2;
+
+                // The blind angle affects social perception only. Hidden neighbours do not steer
+                // alignment/cohesion and do not count as "near" for regrouping FSM decisions.
+                if (p.rearBlindDot > -1f && math.dot(math.normalize(-off), forward) < p.rearBlindDot)
+                    return false;
+
+                if (d2 < a.nearestSqr) a.nearestSqr = d2;
                 a.aliSum += vel[j];
                 a.cohSum += pos[j];
                 a.flock++;
@@ -59,16 +67,16 @@ namespace FishSwarm.Jobs
             return false;
         }
 
-        static bool ScanCell(ref Accum a, int key, float3 myPos, int self,
+        static bool ScanCell(ref Accum a, int key, float3 myPos, float3 forward, int self,
             NativeParallelMultiHashMap<int, int> grid,
             in NativeArray<float3> pos, in NativeArray<float3> vel,
-            float perSqr, float sepSqr, int maxN)
+            float perSqr, float sepSqr, int maxN, in SteeringParams p)
         {
             if (grid.TryGetFirstValue(key, out int j, out var it))
             {
                 do
                 {
-                    if (j != self && AddNeighbor(ref a, myPos, j, pos, vel, perSqr, sepSqr, maxN))
+                    if (j != self && AddNeighbor(ref a, myPos, forward, j, pos, vel, perSqr, sepSqr, maxN, p))
                         return true;
                 }
                 while (grid.TryGetNextValue(out j, ref it));
@@ -164,12 +172,13 @@ namespace FishSwarm.Jobs
             int maxN = p.maxNeighbors;
 
             Accum a = new Accum { nearestSqr = float.MaxValue };
+            float3 forward = math.lengthsq(myVel) > 1e-8f ? math.normalize(myVel) : new float3(0f, 0f, 1f);
 
             if (useGrid)
             {
                 // Own cell first (closest, symmetric), then the 26 neighbours; early-out at the cap.
                 int3 cc = CellCoords(myPos, p);
-                bool done = ScanCell(ref a, CellKey(cc, p), myPos, i, grid, positions, velocities, perSqr, sepSqr, maxN);
+                bool done = ScanCell(ref a, CellKey(cc, p), myPos, forward, i, grid, positions, velocities, perSqr, sepSqr, maxN, p);
                 for (int dz = -1; dz <= 1 && !done; dz++)
                 for (int dy = -1; dy <= 1 && !done; dy++)
                 for (int dx = -1; dx <= 1 && !done; dx++)
@@ -177,7 +186,7 @@ namespace FishSwarm.Jobs
                     if ((dx | dy | dz) == 0) continue; // centre already scanned
                     int3 nc = cc + new int3(dx, dy, dz);
                     if (math.any(nc < 0) || math.any(nc >= p.gridDim)) continue;
-                    done = ScanCell(ref a, CellKey(nc, p), myPos, i, grid, positions, velocities, perSqr, sepSqr, maxN);
+                    done = ScanCell(ref a, CellKey(nc, p), myPos, forward, i, grid, positions, velocities, perSqr, sepSqr, maxN, p);
                 }
             }
             else
@@ -186,7 +195,7 @@ namespace FishSwarm.Jobs
                 for (int j = 0; j < count; j++)
                 {
                     if (j == i) continue;
-                    if (AddNeighbor(ref a, myPos, j, positions, velocities, perSqr, sepSqr, maxN))
+                    if (AddNeighbor(ref a, myPos, forward, j, positions, velocities, perSqr, sepSqr, maxN, p))
                         break;
                 }
             }
@@ -265,15 +274,25 @@ namespace FishSwarm.Jobs
             var rng = new Random((uint)(i * 747796405) ^ frameSeed | 1u);
             float timer = stateTimer[i];
 
-            states[i] = FishBehaviorController.Tick(
+            var input = new FishStateInputs
+            {
+                PredatorInRange = predatorInRange[i],
+                NearestNeighborDistance = nnDist,
+                NearForagingNode = nearNode ? (byte)1 : (byte)0,
+                RandomValue = rng.NextFloat(),
+            };
+
+            var settings = new FishStateSettings
+            {
+                RegroupNeighborDistance = p.regroupNeighborDistance,
+                ForagingChance = p.foragingChancePerTick,
+                ForagingDuration = p.foragingDuration,
+            };
+
+            states[i] = FiniteStateMachine.Tick(
                 states[i],
-                predatorInRange[i] != 0,
-                nnDist,
-                nearNode,
-                rng.NextFloat(),
-                p.regroupNeighborDistance,
-                p.foragingChancePerTick,
-                p.foragingDuration,
+                input,
+                settings,
                 tickDt,
                 ref timer);
 

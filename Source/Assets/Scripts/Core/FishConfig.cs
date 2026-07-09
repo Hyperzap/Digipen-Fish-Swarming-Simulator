@@ -16,6 +16,8 @@ namespace FishSwarm.Core
         public float perceptionRadius = 4f;
         [Tooltip("Closer-range personal-space radius for separation (<= perception).")]
         public float separationRadius = 1.5f;
+        [Tooltip("Rear blind cone in degrees for alignment/cohesion only. 0 = disabled, 35 = subtle, 60 = strong, 90 = ignore the full rear hemisphere. Separation still works in every direction.")]
+        [Range(0f, 179f)] public float rearBlindAngle = 35f;
 
         [Header("Steering weights")]
         public float separationWeight = 1.6f;

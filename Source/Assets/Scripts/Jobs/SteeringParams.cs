@@ -12,6 +12,9 @@ namespace FishSwarm.Jobs
     {
         // Perception / flocking
         public float perceptionRadius, separationRadius;
+        // Dot threshold for the rear blind cone:
+        // -1.0001 = disabled, about -0.82 = 35 degrees behind, 0 = rear hemisphere.
+        public float rearBlindDot;
         public float separationWeight, alignmentWeight, cohesionWeight, boundaryWeight;
         public float3 cohesionAxisWeights;
 
@@ -59,6 +62,7 @@ namespace FishSwarm.Jobs
             {
                 perceptionRadius = c.perceptionRadius,
                 separationRadius = c.separationRadius,
+                rearBlindDot = c.rearBlindAngle > 0f ? math.cos(math.radians(180f - c.rearBlindAngle)) : -1.0001f,
                 separationWeight = c.separationWeight,
                 alignmentWeight = c.alignmentWeight,
                 cohesionWeight = c.cohesionWeight,
