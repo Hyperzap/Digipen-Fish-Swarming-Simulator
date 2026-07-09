@@ -4,6 +4,9 @@ using FishSwarm.Predators;
 
 public class CameraController : MonoBehaviour
 {
+    // Attach this to the active Game camera. Disable CameraOrbit on the same camera,
+    // otherwise both scripts will try to write the camera transform.
+
     [Header("Free camera")]
     [Tooltip("Movement speed for WASD/Space/Shift controls.")]
     public float moveSpeed = 25f;
@@ -39,6 +42,8 @@ public class CameraController : MonoBehaviour
 
     void Start()
     {
+        // Store yaw/pitch separately so right-mouse drag can rotate from the current view
+        // instead of rebuilding from a default orientation.
         Vector3 euler = transform.rotation.eulerAngles;
         _yaw = euler.y;
         _pitch = NormalizePitch(euler.x);
@@ -46,6 +51,7 @@ public class CameraController : MonoBehaviour
 
     void Update()
     {
+        // Input toggles are read in Update so single-frame key presses are not missed.
         Keyboard kb = Keyboard.current;
         if (kb != null && kb[predatorViewKey].wasPressedThisFrame)
             TogglePredatorView();
@@ -53,6 +59,7 @@ public class CameraController : MonoBehaviour
 
     void LateUpdate()
     {
+        // Camera movement happens in LateUpdate so predator follow runs after predator movement.
         if (_predatorView)
             UpdatePredatorView();
         else
@@ -73,6 +80,8 @@ public class CameraController : MonoBehaviour
 
         if (mouse.rightButton.wasPressedThisFrame)
         {
+            // Sync on RMB press and skip the first delta to avoid a sudden view snap
+            // when the Game view captures the mouse.
             SyncAnglesFromTransform();
             _ignoreFirstMouseDelta = true;
         }
@@ -96,6 +105,7 @@ public class CameraController : MonoBehaviour
         Keyboard kb = Keyboard.current;
         if (kb == null) return;
 
+        // Build input in camera-local horizontal axes, with world up/down for vertical travel.
         Vector3 input = Vector3.zero;
         if (kb.wKey.isPressed) input += Vector3.forward;
         if (kb.sKey.isPressed) input += Vector3.back;
@@ -126,6 +136,7 @@ public class CameraController : MonoBehaviour
         float scroll = mouse.scroll.ReadValue().y;
         if (Mathf.Abs(scroll) < 0.01f) return;
 
+        // Scroll zoom is positional, not FOV-based, so it behaves like moving forward/backward.
         transform.position += transform.forward * (scroll * scrollZoomSpeed * Time.deltaTime);
     }
 
@@ -141,6 +152,7 @@ public class CameraController : MonoBehaviour
         Vector3 predatorPos = predator.transform.position;
         Vector3 forward = PredatorForward(predatorPos);
         Vector3 desiredPos = predatorPos - forward * predatorFollowDistance + Vector3.up * predatorFollowHeight;
+        // Looking ahead of the predator smooths the chase camera and avoids staring at its centre.
         Vector3 lookTarget = predatorPos + forward * predatorLookAhead;
         Quaternion desiredRot = Quaternion.LookRotation(lookTarget - desiredPos, Vector3.up);
         float t = 1f - Mathf.Exp(-predatorFollowSharpness * Time.deltaTime);
@@ -167,6 +179,8 @@ public class CameraController : MonoBehaviour
 
     Vector3 PredatorForward(Vector3 currentPosition)
     {
+        // The predator may not always rotate to face its movement, so infer heading from position
+        // deltas and smooth it to avoid camera wobble when the predator changes direction.
         Vector3 targetForward = _predatorForward;
         if (_hasPredatorHistory)
         {
@@ -189,6 +203,7 @@ public class CameraController : MonoBehaviour
 
     void SyncAnglesFromTransform()
     {
+        // Keeps free-look state aligned after predator view or any external camera rotation.
         Vector3 euler = transform.rotation.eulerAngles;
         _yaw = euler.y;
         _pitch = NormalizePitch(euler.x);
