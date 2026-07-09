@@ -80,8 +80,10 @@ namespace FishSwarm.Core
         readonly Stopwatch _simTimer = new Stopwatch();
         readonly Stopwatch _steerTimer = new Stopwatch();
         double _lastSimMs, _lastSteerMs;
+        Vector3 _schoolCenter;
 
         public int Count => _count;
+        public Vector3 SchoolCenter => _schoolCenter;
         public bool UseBurst => useBurst;
         public string ActiveModeName => useGrid ? "Uniform Grid" : "Naive O(n^2)";
         public double LastSimMs => _lastSimMs;
@@ -148,6 +150,7 @@ namespace FishSwarm.Core
             }
 
             Random.state = prev;
+            UpdateSchoolCenter();
         }
 
         void EnsureFloat3Capacity(ref NativeArray<float3> arr, int n)
@@ -235,6 +238,7 @@ namespace FishSwarm.Core
             _simTimer.Stop();
             _lastSimMs = _simTimer.Elapsed.TotalMilliseconds;
 
+            UpdateSchoolCenter();
             RenderFish();
         }
 
@@ -361,6 +365,28 @@ namespace FishSwarm.Core
                     Graphics.RenderMeshInstanced(_stateRenderParams[s], _fishMesh, 0, sub);
                 }
             }
+        }
+
+        void UpdateSchoolCenter()
+        {
+            if (_count == 0)
+            {
+                _schoolCenter = bounds != null ? bounds.Bounds.center : Vector3.zero;
+                return;
+            }
+
+            const int maxSamples = 256;
+            int step = Mathf.Max(1, _count / maxSamples);
+            int samples = 0;
+            Vector3 sum = Vector3.zero;
+
+            for (int i = 0; i < _count; i += step)
+            {
+                sum += (Vector3)_positions[i];
+                samples++;
+            }
+
+            _schoolCenter = samples > 0 ? sum / samples : (bounds != null ? bounds.Bounds.center : Vector3.zero);
         }
 
         void HandleInput()
