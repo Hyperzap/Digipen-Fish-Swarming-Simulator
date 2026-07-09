@@ -31,7 +31,7 @@ MonoBehaviour:
   foragingChancePerTick: 0.02
   foragingDuration: 4
   foragingWeight: 1.5
-  behaviorTickBuckets: 10
+  behaviorTickBuckets: 20
   schoolingSAC: {x: 1, y: 1, z: 1}
   fleeingSAC: {x: 1.5, y: 0.5, z: 0.2}
   regroupingSAC: {x: 1, y: 1.2, z: 2}
