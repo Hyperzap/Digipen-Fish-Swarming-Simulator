@@ -40,6 +40,9 @@ namespace FishSwarm.Core
         public Material fishMaterial;
         [Tooltip("Fallback shader if no material asset is assigned (editor convenience only).")]
         public Shader fishShader;
+        [Tooltip("Custom shader for the GPU-indirect path (FishSwarm/FishIndirect). Reads per-instance " +
+                 "data from a StructuredBuffer and builds the transform on the GPU.")]
+        public Shader indirectShader;
         public Vector3 fishScale = new Vector3(0.25f, 0.25f, 0.7f);
         [Tooltip("Colour per state: 0 Schooling, 1 Fleeing, 2 Regrouping, 3 Foraging.")]
         public Color[] stateColors =
@@ -57,6 +60,12 @@ namespace FishSwarm.Core
         public bool useGrid = true;
         public Key burstToggleKey = Key.B;
         public Key gridToggleKey = Key.Tab;
+        [Tooltip("GPU-indirect rendering (transform built on the GPU) vs CPU-matrix instancing.")]
+        public bool useIndirectRender = false;
+        public Key indirectToggleKey = Key.G;
+        [Tooltip("Simulation LOD: distant fish re-run the neighbour scan every Nth frame (sim-only).")]
+        public bool useLod = false;
+        public Key lodToggleKey = Key.L;
         public bool showStats = true;
 
         // Simulation state (NativeArrays, Persistent).
@@ -64,6 +73,7 @@ namespace FishSwarm.Core
         NativeArray<FishState> _states;
         NativeArray<float> _stateTimer, _nearestNeighborSqr;
         NativeArray<byte> _predatorInRange;
+        NativeArray<byte> _steered; // per-slot this frame: 1 = full scan ran, 0 = LOD-skipped
         NativeArray<float4x4> _matrices, _sortedMatrices;
         NativeArray<int> _stateStart, _stateCount;
         NativeArray<float3> _predatorPositions, _nodePositions;
@@ -75,9 +85,25 @@ namespace FishSwarm.Core
         NativeArray<FishState> _stateB;
         NativeArray<float> _timerB;
         NativeArray<int> _cellIndex, _cellCounts, _cellStart;
+        // Accelerations ping-pong too: LOD-skipped fish reuse their own carried value, and slots
+        // reshuffle every frame, so acceleration must travel with the fish through the sort.
+        NativeArray<float3> _accelB;
+        Camera _camera;
+
+        // GPU-indirect render path: per-instance data uploaded to a GraphicsBuffer, drawn with
+        // RenderMeshIndirect + the custom shader. FishInstance is 2×float4 = 32 bytes.
+        const int InstanceStride = 32;
+        NativeArray<FishInstance> _instances;
+        GraphicsBuffer _instanceBuffer, _argsBuffer;
+        GraphicsBuffer.IndirectDrawIndexedArgs[] _argsData = new GraphicsBuffer.IndirectDrawIndexedArgs[1];
+        Material _indirectMaterial;
+        RenderParams _indirectRenderParams;
 
         int _count, _predatorCount, _nodeCount;
         bool _allocated;
+
+        // Indirect only when explicitly enabled AND the material compiled.
+        bool RenderIndirect => useIndirectRender && _indirectMaterial != null;
 
         // Rendering.
         Mesh _fishMesh;
@@ -96,7 +122,9 @@ namespace FishSwarm.Core
         public Vector3 SchoolCenter => _schoolCenter;
         public bool UseBurst => useBurst;
         public bool UseGrid => useGrid;
+        public bool UseLod => useLod;
         public string ActiveModeName => useGrid ? "Uniform Grid" : "Naive O(n^2)";
+        public string RenderModeName => RenderIndirect ? "GPU Indirect" : "Instanced";
         public double LastSimMs => _lastSimMs;
         public double LastNeighborQueryMs => _lastSteerMs;
         public FishConfig Config => config;
@@ -107,6 +135,7 @@ namespace FishSwarm.Core
         /// <summary>Toggle helpers so UI buttons can mirror the B / Tab keys.</summary>
         public void SetBurst(bool on) => useBurst = on;
         public void SetGrid(bool on) => useGrid = on;
+        public void SetLod(bool on) => useLod = on;
 
         bool _ownsConfig;
 
@@ -151,6 +180,7 @@ namespace FishSwarm.Core
             _stateTimer = new NativeArray<float>(cap, Allocator.Persistent);
             _nearestNeighborSqr = new NativeArray<float>(cap, Allocator.Persistent);
             _predatorInRange = new NativeArray<byte>(cap, Allocator.Persistent);
+            _steered = new NativeArray<byte>(cap, Allocator.Persistent);
             _matrices = new NativeArray<float4x4>(cap, Allocator.Persistent);
             _sortedMatrices = new NativeArray<float4x4>(cap, Allocator.Persistent);
             _stateStart = new NativeArray<int>(StateCount, Allocator.Persistent);
@@ -160,14 +190,23 @@ namespace FishSwarm.Core
 
             _posB = new NativeArray<float3>(cap, Allocator.Persistent);
             _velB = new NativeArray<float3>(cap, Allocator.Persistent);
+            _accelB = new NativeArray<float3>(cap, Allocator.Persistent);
             _stateB = new NativeArray<FishState>(cap, Allocator.Persistent);
             _timerB = new NativeArray<float>(cap, Allocator.Persistent);
             _cellIndex = new NativeArray<int>(cap, Allocator.Persistent);
 
-            var p0 = SteeringParams.From(config, bounds.Bounds.center, bounds.Bounds.size);
+            // Only gridDim is needed here (for cell-array sizing), so LOD/camera args are irrelevant.
+            var p0 = SteeringParams.From(config, bounds.Bounds.center, bounds.Bounds.size,
+                bounds.Bounds.center, false, 0);
             int cellCount = math.max(1, p0.gridDim.x * p0.gridDim.y * p0.gridDim.z);
             _cellCounts = new NativeArray<int>(cellCount, Allocator.Persistent);
             _cellStart = new NativeArray<int>(cellCount + 1, Allocator.Persistent);
+
+            _instances = new NativeArray<FishInstance>(cap, Allocator.Persistent);
+            _instanceBuffer?.Release();
+            _instanceBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, cap, InstanceStride);
+            if (_indirectMaterial != null) _indirectMaterial.SetBuffer("_Instances", _instanceBuffer);
+
             _allocated = true;
         }
 
@@ -215,13 +254,15 @@ namespace FishSwarm.Core
             if (!_allocated) return;
             _positions.Dispose(); _velocities.Dispose(); _accelerations.Dispose();
             _states.Dispose(); _stateTimer.Dispose(); _nearestNeighborSqr.Dispose();
-            _predatorInRange.Dispose(); _matrices.Dispose(); _sortedMatrices.Dispose();
+            _predatorInRange.Dispose(); _steered.Dispose(); _matrices.Dispose(); _sortedMatrices.Dispose();
             _stateStart.Dispose(); _stateCount.Dispose();
             _predatorPositions.Dispose(); _nodePositions.Dispose();
             _posB.Dispose(); _velB.Dispose(); _stateB.Dispose(); _timerB.Dispose();
+            _accelB.Dispose();
             _cellIndex.Dispose();
             if (_cellCounts.IsCreated) _cellCounts.Dispose();
             if (_cellStart.IsCreated) _cellStart.Dispose();
+            _instances.Dispose();
             _allocated = false;
         }
 
@@ -264,6 +305,31 @@ namespace FishSwarm.Core
             }
 
             if (tempBase) Destroy(baseMat);
+
+            // GPU-indirect material (custom shader). Optional — the render path falls back to
+            // instanced if the shader is missing, so this can never break the scene.
+            if (indirectShader != null)
+            {
+                _indirectMaterial = new Material(indirectShader);
+                _indirectMaterial.SetVector("_FishScale", new Vector4(fishScale.x, fishScale.y, fishScale.z, 0f));
+                var cols = new Vector4[StateCount];
+                for (int s = 0; s < StateCount; s++)
+                {
+                    Color c = (stateColors != null && s < stateColors.Length) ? stateColors[s] : Color.white;
+                    // SetVectorArray does no colour-space conversion, so convert sRGB -> linear
+                    // ourselves. Without this the colours read far too bright (washed out) in the
+                    // project's Linear colour space, unlike URP/Lit which converts automatically.
+                    cols[s] = c.linear;
+                }
+                _indirectMaterial.SetVectorArray("_StateColors", cols);
+                _indirectRenderParams = new RenderParams(_indirectMaterial)
+                {
+                    worldBounds = worldBounds,
+                    shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off,
+                    receiveShadows = false,
+                };
+            }
+            _argsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 1, GraphicsBuffer.IndirectDrawIndexedArgs.size);
         }
 
         // ---- Update -------------------------------------------------------------------------
@@ -287,7 +353,11 @@ namespace FishSwarm.Core
             HandleInput();
             SnapshotThreatsAndNodes();
 
-            var p = SteeringParams.From(config, bounds.Bounds.center, bounds.Bounds.size);
+            if (_camera == null) _camera = Camera.main;
+            float3 camPos = _camera != null ? (float3)_camera.transform.position : (float3)bounds.Bounds.center;
+
+            var p = SteeringParams.From(config, bounds.Bounds.center, bounds.Bounds.size,
+                camPos, useLod, Time.frameCount);
             float dt = Time.deltaTime;
 
             _simTimer.Restart();
@@ -318,18 +388,21 @@ namespace FishSwarm.Core
                 count = _count, cellCount = cellCount, cellIndex = _cellIndex,
                 cellCounts = _cellCounts, cellStart = _cellStart,
                 srcPos = _positions, srcVel = _velocities, srcState = _states, srcTimer = _stateTimer,
+                srcAccel = _accelerations,
                 dstPos = _posB, dstVel = _velB, dstState = _stateB, dstTimer = _timerB,
+                dstAccel = _accelB,
             }.Schedule(indexH);
 
-            // Steering over the cell-sorted buffers — contiguous neighbour reads.
+            // Steering over the cell-sorted buffers — contiguous neighbour reads. Writes into the
+            // sorted accel buffer, which the sort pre-filled with each fish's carried value (LOD).
             var steerH = new SteeringJob
             {
                 positions = _posB, velocities = _velB, states = _stateB,
                 predators = _predatorPositions, predatorCount = _predatorCount,
                 nodes = _nodePositions, nodeCount = _nodeCount,
                 cellStart = _cellStart, useGrid = useGrid, p = p,
-                accelerations = _accelerations, nearestNeighborSqr = _nearestNeighborSqr,
-                predatorInRange = _predatorInRange,
+                accelerations = _accelB, nearestNeighborSqr = _nearestNeighborSqr,
+                predatorInRange = _predatorInRange, steered = _steered,
             }.Schedule(_count, 64, sortH);
             steerH.Complete();
             _steerTimer.Stop();
@@ -340,6 +413,7 @@ namespace FishSwarm.Core
             {
                 positions = _posB, nearestNeighborSqr = _nearestNeighborSqr,
                 predatorInRange = _predatorInRange, nodes = _nodePositions, nodeCount = _nodeCount,
+                steered = _steered,
                 states = _stateB, stateTimer = _timerB, p = p,
                 frameBucket = Time.frameCount % buckets, buckets = buckets,
                 tickDt = dt * buckets, frameSeed = (uint)(Time.frameCount * 9781 + 1),
@@ -348,15 +422,32 @@ namespace FishSwarm.Core
             // Integrate must run after behaviour (behaviour reads posB; integrate writes it).
             var integrateH = new IntegrateJob
             {
-                positions = _posB, velocities = _velB, accelerations = _accelerations,
-                matrices = _matrices, dt = dt, p = p, scale = fishScale,
+                positions = _posB, velocities = _velB, accelerations = _accelB,
+                dt = dt, p = p,
             }.Schedule(_count, 64, behaviorH);
 
-            new BucketByStateJob
+            // Render prep: pack instances for the GPU (indirect, no CPU matrices) OR build + bucket
+            // matrices for RenderMeshInstanced.
+            if (RenderIndirect)
             {
-                count = _count, states = _stateB, matrices = _matrices,
-                sorted = _sortedMatrices, stateStart = _stateStart, stateCount = _stateCount,
-            }.Schedule(integrateH).Complete();
+                new PackInstancesJob
+                {
+                    positions = _posB, velocities = _velB, states = _stateB, instances = _instances,
+                }.Schedule(_count, 64, integrateH).Complete();
+            }
+            else
+            {
+                var matricesH = new BuildMatricesJob
+                {
+                    positions = _posB, velocities = _velB, matrices = _matrices, scale = fishScale,
+                }.Schedule(_count, 64, integrateH);
+
+                new BucketByStateJob
+                {
+                    count = _count, states = _stateB, matrices = _matrices,
+                    sorted = _sortedMatrices, stateStart = _stateStart, stateCount = _stateCount,
+                }.Schedule(matricesH).Complete();
+            }
 
             SwapBuffers();
         }
@@ -368,6 +459,7 @@ namespace FishSwarm.Core
             (_velocities, _velB) = (_velB, _velocities);
             (_states, _stateB) = (_stateB, _states);
             (_stateTimer, _timerB) = (_timerB, _stateTimer);
+            (_accelerations, _accelB) = (_accelB, _accelerations);
         }
 
         void RunManaged(SteeringParams p, float dt)
@@ -381,12 +473,13 @@ namespace FishSwarm.Core
                 FishSteering.BuildCellIndex(i, _positions, p, _cellIndex);
 
             FishSteering.CountingSort(_count, cellCount, _cellIndex, _cellCounts, _cellStart,
-                _positions, _velocities, _states, _stateTimer, _posB, _velB, _stateB, _timerB);
+                _positions, _velocities, _states, _stateTimer, _accelerations,
+                _posB, _velB, _stateB, _timerB, _accelB);
 
             for (int i = 0; i < _count; i++)
             {
                 FishSteering.Step(i, _posB, _velB, _stateB, _predatorPositions, _predatorCount,
-                    _nodePositions, _nodeCount, _cellStart, useGrid, p, _accelerations, _nearestNeighborSqr, _predatorInRange);
+                    _nodePositions, _nodeCount, _cellStart, useGrid, p, _accelB, _nearestNeighborSqr, _predatorInRange, _steered);
             }
             _steerTimer.Stop();
             _lastSteerMs = _steerTimer.Elapsed.TotalMilliseconds;
@@ -397,16 +490,27 @@ namespace FishSwarm.Core
             uint seed = (uint)(Time.frameCount * 9781 + 1);
             for (int i = frameBucket; i < _count; i += buckets)
             {
+                if (_steered[i] == 0) continue; // LOD-skipped: inputs are stale, hold state
                 FishSteering.TickBehavior(i, _posB, _nearestNeighborSqr, _predatorInRange,
                     _nodePositions, _nodeCount, _stateB, _timerB, p, tickDt, seed);
             }
 
             for (int i = 0; i < _count; i++)
             {
-                FishSteering.Integrate(i, _posB, _velB, _accelerations, _matrices, dt, p, fishScale);
+                FishSteering.Integrate(i, _posB, _velB, _accelB, dt, p);
             }
 
-            FishSteering.BucketByState(_count, _stateB, _matrices, _sortedMatrices, _stateStart, _stateCount);
+            if (RenderIndirect)
+            {
+                for (int i = 0; i < _count; i++)
+                    FishSteering.PackInstance(i, _posB, _velB, _stateB, _instances);
+            }
+            else
+            {
+                for (int i = 0; i < _count; i++)
+                    FishSteering.BuildMatrix(i, _posB, _velB, _matrices, fishScale);
+                FishSteering.BucketByState(_count, _stateB, _matrices, _sortedMatrices, _stateStart, _stateCount);
+            }
 
             SwapBuffers();
         }
@@ -428,6 +532,12 @@ namespace FishSwarm.Core
 
         void RenderFish()
         {
+            if (RenderIndirect) RenderFishIndirect();
+            else RenderFishInstanced();
+        }
+
+        void RenderFishInstanced()
+        {
             const int kBatch = 1023;
             var mats = _sortedMatrices.Reinterpret<Matrix4x4>();
             for (int s = 0; s < StateCount; s++)
@@ -441,6 +551,20 @@ namespace FishSwarm.Core
                     Graphics.RenderMeshInstanced(_stateRenderParams[s], _fishMesh, 0, sub);
                 }
             }
+        }
+
+        void RenderFishIndirect()
+        {
+            _instanceBuffer.SetData(_instances, 0, 0, _count);
+
+            _argsData[0].indexCountPerInstance = _fishMesh.GetIndexCount(0);
+            _argsData[0].instanceCount = (uint)_count;
+            _argsData[0].startIndex = _fishMesh.GetIndexStart(0);
+            _argsData[0].baseVertexIndex = _fishMesh.GetBaseVertex(0);
+            _argsData[0].startInstance = 0;
+            _argsBuffer.SetData(_argsData);
+
+            Graphics.RenderMeshIndirect(_indirectRenderParams, _fishMesh, _argsBuffer, 1);
         }
 
         void UpdateSchoolCenter()
@@ -471,6 +595,9 @@ namespace FishSwarm.Core
             if (kb == null) return;
             if (kb[gridToggleKey].wasPressedThisFrame) useGrid = !useGrid;
             if (kb[burstToggleKey].wasPressedThisFrame) useBurst = !useBurst;
+            if (kb[indirectToggleKey].wasPressedThisFrame && _indirectMaterial != null)
+                useIndirectRender = !useIndirectRender;
+            if (kb[lodToggleKey].wasPressedThisFrame) useLod = !useLod;
         }
 
         void OnDestroy()
@@ -480,6 +607,9 @@ namespace FishSwarm.Core
                 foreach (var m in _stateMaterials)
                     if (m != null) Destroy(m);
             if (_ownsConfig && config != null) Destroy(config);
+            _instanceBuffer?.Release();
+            _argsBuffer?.Release();
+            if (_indirectMaterial != null) Destroy(_indirectMaterial);
         }
     }
 }

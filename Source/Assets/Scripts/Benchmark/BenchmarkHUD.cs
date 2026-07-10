@@ -33,6 +33,7 @@ namespace FishSwarm.Benchmark
         struct Snapshot
         {
             public float sep, ali, coh, bnd, threat, maxSpeed, perception;
+            public float sepGain, maxSepForce, sepRadius;
             public int maxNeighbors;
             public Vector3 axis;
         }
@@ -85,6 +86,8 @@ namespace FishSwarm.Benchmark
                 bnd = c.boundaryWeight, threat = c.threatWeight, maxSpeed = c.maxSpeed,
                 perception = c.perceptionRadius, maxNeighbors = c.maxNeighbors,
                 axis = c.cohesionAxisWeights,
+                sepGain = c.separationGain, maxSepForce = c.maxSeparationForce,
+                sepRadius = c.separationRadius,
             };
             _haveSnapshot = true;
         }
@@ -98,6 +101,8 @@ namespace FishSwarm.Benchmark
             c.threatWeight = _original.threat; c.maxSpeed = _original.maxSpeed;
             c.perceptionRadius = _original.perception; c.maxNeighbors = _original.maxNeighbors;
             c.cohesionAxisWeights = _original.axis;
+            c.separationGain = _original.sepGain; c.maxSeparationForce = _original.maxSepForce;
+            c.separationRadius = _original.sepRadius;
         }
 
         void OnGUI()
@@ -117,6 +122,8 @@ namespace FishSwarm.Benchmark
 
             GUILayout.Label($"Fish: <b>{fishManager.Count:n0}</b>", _label);
             GUILayout.Label($"Burst: <b>{(fishManager.UseBurst ? "ON" : "OFF")}</b>   Mode: <b>{fishManager.ActiveModeName}</b>", _label);
+            GUILayout.Label($"Render: <b>{fishManager.RenderModeName}</b>   ([G] toggle)", _label);
+            GUILayout.Label($"Sim LOD: <b>{(fishManager.UseLod ? "ON" : "OFF")}</b>   ([L] toggle)", _label);
 
             // Header + now/avg/max rows — averages are what to compare across optimizations.
             GUILayout.BeginHorizontal();
@@ -168,6 +175,8 @@ namespace FishSwarm.Benchmark
                 fishManager.SetBurst(!fishManager.UseBurst);
             if (GUILayout.Button(fishManager.UseGrid ? "Grid" : "Naive O(n^2)"))
                 fishManager.SetGrid(!fishManager.UseGrid);
+            if (GUILayout.Button(fishManager.UseLod ? "LOD: ON" : "LOD: OFF"))
+                fishManager.SetLod(!fishManager.UseLod);
             GUILayout.EndHorizontal();
 
             if (c != null)
@@ -179,6 +188,12 @@ namespace FishSwarm.Benchmark
                 c.cohesionWeight = Slider("Cohesion", c.cohesionWeight, 0f, 5f);
                 c.boundaryWeight = Slider("Boundary", c.boundaryWeight, 0f, 5f);
                 c.threatWeight = Slider("Threat", c.threatWeight, 0f, 12f);
+
+                GUILayout.Space(6);
+                GUILayout.Label("<b>Anti-clipping (separation)</b>", _label);
+                c.separationGain = Slider("Sep gain", c.separationGain, 0f, 20f);
+                c.maxSeparationForce = Slider("Max sep force", c.maxSeparationForce, 1f, 120f);
+                c.separationRadius = Slider("Sep radius", c.separationRadius, 0.2f, 6f);
 
                 GUILayout.Space(6);
                 GUILayout.Label("<b>Movement / perception</b>", _label);

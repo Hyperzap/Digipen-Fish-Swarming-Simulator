@@ -38,16 +38,19 @@ namespace FishSwarm.Jobs
         [ReadOnly] public NativeArray<float3> srcVel;
         [ReadOnly] public NativeArray<FishState> srcState;
         [ReadOnly] public NativeArray<float> srcTimer;
+        [ReadOnly] public NativeArray<float3> srcAccel;
 
         [WriteOnly] public NativeArray<float3> dstPos;
         [WriteOnly] public NativeArray<float3> dstVel;
         [WriteOnly] public NativeArray<FishState> dstState;
         [WriteOnly] public NativeArray<float> dstTimer;
+        [WriteOnly] public NativeArray<float3> dstAccel;
 
         public void Execute()
         {
             FishSteering.CountingSort(count, cellCount, cellIndex, cellCounts, cellStart,
-                srcPos, srcVel, srcState, srcTimer, dstPos, dstVel, dstState, dstTimer);
+                srcPos, srcVel, srcState, srcTimer, srcAccel,
+                dstPos, dstVel, dstState, dstTimer, dstAccel);
         }
     }
 
@@ -65,14 +68,16 @@ namespace FishSwarm.Jobs
         public bool useGrid;
         public SteeringParams p;
 
-        [WriteOnly] public NativeArray<float3> accelerations;
-        [WriteOnly] public NativeArray<float> nearestNeighborSqr;
-        [WriteOnly] public NativeArray<byte> predatorInRange;
+        // Not [WriteOnly]: LOD-skipped fish leave their carried accel/nearest/predatorInRange untouched.
+        public NativeArray<float3> accelerations;
+        public NativeArray<float> nearestNeighborSqr;
+        public NativeArray<byte> predatorInRange;
+        [WriteOnly] public NativeArray<byte> steered; // 1 = full scan ran this frame, 0 = LOD-skipped
 
         public void Execute(int i)
         {
             FishSteering.Step(i, positions, velocities, states, predators, predatorCount,
-                nodes, nodeCount, cellStart, useGrid, p, accelerations, nearestNeighborSqr, predatorInRange);
+                nodes, nodeCount, cellStart, useGrid, p, accelerations, nearestNeighborSqr, predatorInRange, steered);
         }
     }
 
@@ -84,6 +89,7 @@ namespace FishSwarm.Jobs
         [ReadOnly] public NativeArray<byte> predatorInRange;
         [ReadOnly] public NativeArray<float3> nodes;
         public int nodeCount;
+        [ReadOnly] public NativeArray<byte> steered;
         public NativeArray<FishState> states;
         public NativeArray<float> stateTimer;
         public SteeringParams p;
@@ -95,6 +101,7 @@ namespace FishSwarm.Jobs
         public void Execute(int i)
         {
             if ((i % buckets) != frameBucket) return; // staggered: only this frame's slice ticks
+            if (steered[i] == 0) return;               // LOD-skipped: inputs are stale, hold state
             FishSteering.TickBehavior(i, positions, nearestNeighborSqr, predatorInRange,
                 nodes, nodeCount, states, stateTimer, p, tickDt, frameSeed);
         }
@@ -106,15 +113,34 @@ namespace FishSwarm.Jobs
         public NativeArray<float3> positions;
         public NativeArray<float3> velocities;
         [ReadOnly] public NativeArray<float3> accelerations;
-        [WriteOnly] public NativeArray<float4x4> matrices;
         public float dt;
         public SteeringParams p;
+
+        public void Execute(int i) => FishSteering.Integrate(i, positions, velocities, accelerations, dt, p);
+    }
+
+    // Instanced render path: CPU-built TRS matrices (then colour-bucketed for RenderMeshInstanced).
+    [BurstCompile]
+    public struct BuildMatricesJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<float3> positions;
+        [ReadOnly] public NativeArray<float3> velocities;
+        [WriteOnly] public NativeArray<float4x4> matrices;
         public float3 scale;
 
-        public void Execute(int i)
-        {
-            FishSteering.Integrate(i, positions, velocities, accelerations, matrices, dt, p, scale);
-        }
+        public void Execute(int i) => FishSteering.BuildMatrix(i, positions, velocities, matrices, scale);
+    }
+
+    // Indirect render path: pack pos/heading/state for the GPU (transform built in the vertex shader).
+    [BurstCompile]
+    public struct PackInstancesJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<float3> positions;
+        [ReadOnly] public NativeArray<float3> velocities;
+        [ReadOnly] public NativeArray<FishState> states;
+        [WriteOnly] public NativeArray<FishInstance> instances;
+
+        public void Execute(int i) => FishSteering.PackInstance(i, positions, velocities, states, instances);
     }
 
     [BurstCompile]

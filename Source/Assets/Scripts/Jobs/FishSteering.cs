@@ -7,6 +7,16 @@ using Random = Unity.Mathematics.Random;
 namespace FishSwarm.Jobs
 {
     /// <summary>
+    /// Per-instance render data for the GPU-indirect path. Two float4s (32 bytes, 16-byte aligned)
+    /// so the layout matches <c>StructuredBuffer&lt;FishInstance&gt;</c> in FishIndirect.shader.
+    /// </summary>
+    public struct FishInstance
+    {
+        public float4 pos; // xyz = world position
+        public float4 fwd; // xyz = heading (normalised), w = state index
+    }
+
+    /// <summary>
     /// Burst-compatible per-fish simulation, written with <c>Unity.Mathematics</c> and only
     /// blittable value/native types. Every method here runs Burst-compiled + parallel when called
     /// from a scheduled <c>[BurstCompile]</c> job (Burst ON), and as plain single-threaded IL when
@@ -51,8 +61,10 @@ namespace FishSwarm.Jobs
             NativeArray<int> cellCounts, NativeArray<int> cellStart,
             in NativeArray<float3> srcPos, in NativeArray<float3> srcVel,
             in NativeArray<FishState> srcState, in NativeArray<float> srcTimer,
+            in NativeArray<float3> srcAccel,
             NativeArray<float3> dstPos, NativeArray<float3> dstVel,
-            NativeArray<FishState> dstState, NativeArray<float> dstTimer)
+            NativeArray<FishState> dstState, NativeArray<float> dstTimer,
+            NativeArray<float3> dstAccel)
         {
             for (int c = 0; c < cellCount; c++) cellCounts[c] = 0;
             for (int i = 0; i < count; i++) cellCounts[cellIndex[i]]++;
@@ -70,6 +82,9 @@ namespace FishSwarm.Jobs
                 dstVel[slot] = srcVel[i];
                 dstState[slot] = srcState[i];
                 dstTimer[slot] = srcTimer[i];
+                // Acceleration must follow the fish: LOD-skipped fish reuse their own last value,
+                // and slots reshuffle every frame.
+                dstAccel[slot] = srcAccel[i];
             }
         }
 
@@ -179,6 +194,23 @@ namespace FishSwarm.Jobs
             return Steer(flee, vel, p) * p.threatWeight;
         }
 
+        /// <summary>
+        /// How many frames between full neighbour scans for this fish. 1 = every frame ("hero").
+        /// Predator proximity always forces 1 so flee/split behaviour stays exact; otherwise it's
+        /// distance to the camera. Sim-only — every fish still integrates (moves) every frame.
+        /// </summary>
+        static int LodStride(float3 pos, in NativeArray<float3> predators, int predatorCount, in SteeringParams p)
+        {
+            for (int k = 0; k < predatorCount; k++)
+                if (math.lengthsq(pos - predators[k]) < p.lodPredatorRadiusSqr)
+                    return 1;
+
+            float camSqr = math.lengthsq(pos - p.cameraPos);
+            if (camSqr < p.lodNearSqr) return 1;
+            if (camSqr < p.lodMidSqr) return p.lodMidStride;
+            return p.lodFarStride;
+        }
+
         static int NearestNode(float3 pos, in NativeArray<float3> nodes, int nodeCount, in SteeringParams p)
         {
             float best = p.foragingNodeRadius * p.foragingNodeRadius;
@@ -202,11 +234,29 @@ namespace FishSwarm.Jobs
             in SteeringParams p,
             NativeArray<float3> accelerations,
             NativeArray<float> nearestNeighborSqr,
-            NativeArray<byte> predatorInRange)
+            NativeArray<byte> predatorInRange,
+            NativeArray<byte> steered)
         {
             float3 myPos = positions[i];
             float3 myVel = velocities[i];
             int state = (int)states[i];
+
+            // Simulation LOD: distant fish skip the (expensive) neighbour scan on most frames and
+            // coast on the acceleration carried through the counting sort. Fish in the same cell
+            // share a phase, so the branch stays coherent and the load spreads across frames.
+            if (p.lodEnabled != 0)
+            {
+                int stride = LodStride(myPos, predators, predatorCount, p);
+                if (stride > 1 && (uint)(p.frame + CellKey(CellCoords(myPos, p), p)) % (uint)stride != 0)
+                {
+                    // Not scanned this frame: coast on the carried acceleration and, crucially, tell
+                    // the FSM to skip too — its neighbour/predator inputs are stale, so ticking on
+                    // them would be wrong (a Regrouping fish could never see it rejoined). The FSM
+                    // just holds this fish's state until steering runs again.
+                    steered[i] = 0;
+                    return; // accelerations[i], nearestNeighborSqr[i], predatorInRange[i] all kept
+                }
+            }
 
             float perSqr = p.perceptionRadius * p.perceptionRadius;
             float sepSqr = p.separationRadius * p.separationRadius;
@@ -255,8 +305,16 @@ namespace FishSwarm.Jobs
                 force += coh * (p.cohesionWeight * sac.z);
             }
 
+            // Separation keeps its accumulated magnitude (|a.sep| ~ sum of 1/d) rather than being
+            // normalised away by Steer(). That magnitude blows up as fish approach contact, giving a
+            // strong short-range repulsion — a "soft collision" that costs nothing extra, since the
+            // neighbour scan already gathered it. Clamped separately, above maxSteerForce, so
+            // crowded fish can push harder than ordinary steering permits.
             if (math.lengthsq(a.sep) > 1e-8f)
-                force += Steer(a.sep, myVel, p) * (p.separationWeight * sac.x);
+            {
+                float3 sepForce = ClampMag(a.sep * p.separationGain, p.maxSeparationForce);
+                force += sepForce * (p.separationWeight * sac.x);
+            }
 
             force += Boundary(myPos, myVel, p);
             force += Threat(myPos, myVel, predators, predatorCount, p, out byte inRange);
@@ -272,14 +330,14 @@ namespace FishSwarm.Jobs
             accelerations[i] = force;
             nearestNeighborSqr[i] = a.nearestSqr;
             predatorInRange[i] = inRange;
+            steered[i] = 1;
         }
 
         // ---- Integration -------------------------------------------------------------------
 
         public static void Integrate(int i,
             NativeArray<float3> positions, NativeArray<float3> velocities,
-            in NativeArray<float3> accelerations, NativeArray<float4x4> matrices,
-            float dt, in SteeringParams p, float3 scale)
+            in NativeArray<float3> accelerations, float dt, in SteeringParams p)
         {
             float3 v = velocities[i] + accelerations[i] * dt;
             float speed = math.length(v);
@@ -293,12 +351,34 @@ namespace FishSwarm.Jobs
                 v = v / speed * math.clamp(speed, p.minSpeed, p.maxSpeed);
             }
 
-            float3 pos = positions[i] + v * dt;
             velocities[i] = v;
-            positions[i] = pos;
+            positions[i] = positions[i] + v * dt;
+        }
 
-            quaternion rot = quaternion.LookRotationSafe(v, math.up());
-            matrices[i] = float4x4.TRS(pos, rot, scale);
+        /// <summary>Instanced-render path: build a TRS matrix from position + heading.</summary>
+        public static void BuildMatrix(int i,
+            in NativeArray<float3> positions, in NativeArray<float3> velocities,
+            NativeArray<float4x4> matrices, float3 scale)
+        {
+            float3 v = velocities[i];
+            quaternion rot = math.lengthsq(v) > 1e-8f
+                ? quaternion.LookRotationSafe(v, math.up())
+                : quaternion.identity;
+            matrices[i] = float4x4.TRS(positions[i], rot, scale);
+        }
+
+        /// <summary>Indirect-render path: pack position + heading + state for the GPU (no matrix).</summary>
+        public static void PackInstance(int i,
+            in NativeArray<float3> positions, in NativeArray<float3> velocities,
+            in NativeArray<FishState> states, NativeArray<FishInstance> instances)
+        {
+            float3 v = velocities[i];
+            float3 f = math.lengthsq(v) > 1e-8f ? math.normalize(v) : new float3(0f, 0f, 1f);
+            instances[i] = new FishInstance
+            {
+                pos = new float4(positions[i], 0f),
+                fwd = new float4(f, (float)(int)states[i]),
+            };
         }
 
         // ---- Behaviour tick (staggered) ----------------------------------------------------

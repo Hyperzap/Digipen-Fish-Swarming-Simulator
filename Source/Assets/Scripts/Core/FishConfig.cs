@@ -26,6 +26,27 @@ namespace FishSwarm.Core
         [Tooltip("How hard fish turn away from the volume edges.")]
         public float boundaryWeight = 2.0f;
 
+        [Header("Simulation LOD (sim-only; render LOD is separate)")]
+        [Tooltip("Within this distance of the camera, fish always run the full neighbour scan.")]
+        public float lodNearDistance = 60f;
+        [Tooltip("Between near and mid distance, fish steer every lodMidStride frames.")]
+        public float lodMidDistance = 150f;
+        [Min(1)] public int lodMidStride = 2;
+        [Tooltip("Beyond mid distance, fish steer every lodFarStride frames (reusing last acceleration).")]
+        [Min(1)] public int lodFarStride = 4;
+        [Tooltip("Fish within this distance of ANY predator always run at full rate, so flee/split " +
+                 "stays correct. Keep this comfortably above predatorFleeRadius.")]
+        public float lodPredatorRadius = 32f;
+
+        [Header("Anti-clipping (separation strength)")]
+        [Tooltip("Scales the raw inverse-distance separation sum into force units. Separation " +
+                 "magnitude grows as ~1/distance, so this is what makes crowded fish push apart " +
+                 "harder than lonely ones. Higher = more personal space.")]
+        public float separationGain = 4f;
+        [Tooltip("Clamp for the separation force. Deliberately set ABOVE maxSteerForce so near-contact " +
+                 "fish can push harder than normal steering allows — this is what stops interpenetration.")]
+        public float maxSeparationForce = 40f;
+
         [Header("School shape")]
         [Tooltip("Per-axis cohesion stiffness. Equilibrium extent runs roughly as 1/weight, so a " +
                  "non-uniform vector makes the school ellipsoidal instead of spherical. Lower Y = " +

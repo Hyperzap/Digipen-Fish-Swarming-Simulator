@@ -18,6 +18,9 @@ namespace FishSwarm.Jobs
         public float separationWeight, alignmentWeight, cohesionWeight, boundaryWeight;
         public float3 cohesionAxisWeights;
 
+        // Anti-clipping: separation keeps its accumulated magnitude, scaled + clamped separately.
+        public float separationGain, maxSeparationForce;
+
         // Movement
         public float maxSpeed, minSpeed, maxSteerForce, boundaryMargin;
         public int maxNeighbors;
@@ -39,6 +42,14 @@ namespace FishSwarm.Jobs
         public float cellSize;
         public int3 gridDim;
 
+        // Simulation LOD. Far fish re-run the neighbour scan only every Nth frame and coast on
+        // their last acceleration in between; predator-adjacent fish are always full rate.
+        public byte lodEnabled;
+        public float3 cameraPos;
+        public float lodNearSqr, lodMidSqr, lodPredatorRadiusSqr;
+        public int lodMidStride, lodFarStride;
+        public int frame; // phase source, combined with cell key so cells tick together
+
         /// <summary>Per-state (separation, alignment, cohesion) multipliers. State int matches FishState.</summary>
         public readonly float3 SacFor(int state)
         {
@@ -51,8 +62,9 @@ namespace FishSwarm.Jobs
             }
         }
 
-        /// <summary>Build the per-frame snapshot from the config + ocean bounds.</summary>
-        public static SteeringParams From(FishConfig c, float3 boundsCenter, float3 boundsSize)
+        /// <summary>Build the per-frame snapshot from the config + ocean bounds + LOD state.</summary>
+        public static SteeringParams From(FishConfig c, float3 boundsCenter, float3 boundsSize,
+            float3 cameraPos, bool lodEnabled, int frame)
         {
             float cell = math.max(c.perceptionRadius, 0.0001f);
             float3 origin = boundsCenter - boundsSize * 0.5f;
@@ -68,6 +80,8 @@ namespace FishSwarm.Jobs
                 cohesionWeight = c.cohesionWeight,
                 boundaryWeight = c.boundaryWeight,
                 cohesionAxisWeights = c.cohesionAxisWeights,
+                separationGain = c.separationGain,
+                maxSeparationForce = c.maxSeparationForce,
 
                 maxSpeed = c.maxSpeed,
                 minSpeed = c.minSpeed,
@@ -94,6 +108,15 @@ namespace FishSwarm.Jobs
                 gridOrigin = origin,
                 cellSize = cell,
                 gridDim = dim,
+
+                lodEnabled = (byte)(lodEnabled ? 1 : 0),
+                cameraPos = cameraPos,
+                lodNearSqr = c.lodNearDistance * c.lodNearDistance,
+                lodMidSqr = c.lodMidDistance * c.lodMidDistance,
+                lodPredatorRadiusSqr = c.lodPredatorRadius * c.lodPredatorRadius,
+                lodMidStride = math.max(1, c.lodMidStride),
+                lodFarStride = math.max(1, c.lodFarStride),
+                frame = frame,
             };
         }
     }

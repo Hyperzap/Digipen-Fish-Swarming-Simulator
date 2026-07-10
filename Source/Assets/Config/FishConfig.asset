@@ -19,6 +19,13 @@ MonoBehaviour:
   alignmentWeight: 1
   cohesionWeight: 1
   boundaryWeight: 2
+  lodNearDistance: 60
+  lodMidDistance: 150
+  lodMidStride: 2
+  lodFarStride: 4
+  lodPredatorRadius: 32
+  separationGain: 4
+  maxSeparationForce: 40
   cohesionAxisWeights: {x: 1, y: 0.7, z: 0.75}
   maxSpeed: 8
   minSpeed: 2

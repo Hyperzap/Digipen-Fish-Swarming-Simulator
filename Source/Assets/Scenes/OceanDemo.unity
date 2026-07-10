@@ -163,7 +163,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30021, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  size: {x: 600, y: 400, z: 400}
+  size: {x: 600, y: 300, z: 600}
   gizmoColor: {r: 0.2, g: 0.6, b: 1, a: 0.5}
 --- !u!1 &100020000
 GameObject:
@@ -212,11 +212,12 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   config: {fileID: 11400000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30042, type: 2}
   bounds: {fileID: 100010002}
-  spawnCount: 1000
+  spawnCount: 300000
   randomSeed: 12345
   spawnRadius: 150
   fishMaterial: {fileID: 2100000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30043, type: 2}
   fishShader: {fileID: 4800000, guid: 933532a4fcc9baf4fa0491de14d08ed7, type: 3}
+  indirectShader: {fileID: 4800000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f300a1, type: 3}
   fishScale: {x: 0.25, y: 0.25, z: 0.7}
   stateColors:
   - {r: 0.8, g: 0.85, b: 0.55, a: 1}
@@ -227,6 +228,10 @@ MonoBehaviour:
   useGrid: 1
   burstToggleKey: 16
   gridToggleKey: 3
+  useIndirectRender: 0
+  indirectToggleKey: 21
+  useLod: 0
+  lodToggleKey: 26
   showStats: 1
 --- !u!114 &100020003
 MonoBehaviour:
