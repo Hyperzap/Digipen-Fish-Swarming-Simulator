@@ -14,7 +14,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   perceptionRadius: 6
   separationRadius: 2
-  rearBlindAngle: 35
+  rearBlindAngle: 90
   separationWeight: 1.6
   alignmentWeight: 1
   cohesionWeight: 1

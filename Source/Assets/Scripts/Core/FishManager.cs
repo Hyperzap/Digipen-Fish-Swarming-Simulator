@@ -82,16 +82,39 @@ namespace FishSwarm.Core
         double _lastSimMs, _lastSteerMs;
         Vector3 _schoolCenter;
 
+        int _pendingCount = -1;
+
         public int Count => _count;
         public Vector3 SchoolCenter => _schoolCenter;
         public bool UseBurst => useBurst;
+        public bool UseGrid => useGrid;
         public string ActiveModeName => useGrid ? "Uniform Grid" : "Naive O(n^2)";
         public double LastSimMs => _lastSimMs;
         public double LastNeighborQueryMs => _lastSteerMs;
+        public FishConfig Config => config;
+
+        /// <summary>Request a new population; applied at the top of the next Update (race-free).</summary>
+        public void RequestPopulation(int n) => _pendingCount = Mathf.Max(0, n);
+
+        /// <summary>Toggle helpers so UI buttons can mirror the B / Tab keys.</summary>
+        public void SetBurst(bool on) => useBurst = on;
+        public void SetGrid(bool on) => useGrid = on;
+
+        bool _ownsConfig;
+
+        void Awake()
+        {
+            // Work on a runtime copy of the config so live tuning (HUD sliders) never mutates the
+            // FishConfig asset on disk. The original asset is the untouched backup; the clone is
+            // what's read (SteeringParams snapshot) and written (HUD) every frame, and is discarded
+            // on teardown. Done in Awake so it exists before any other component's Start reads it.
+            if (config == null) config = FishConfig.CreateDefault();
+            else config = Instantiate(config);
+            _ownsConfig = true;
+        }
 
         void Start()
         {
-            if (config == null) config = FishConfig.CreateDefault();
             if (bounds == null) bounds = FindFirstObjectByType<OceanBounds>();
             if (bounds == null)
             {
@@ -224,6 +247,18 @@ namespace FishSwarm.Core
 
         void Update()
         {
+            // Apply a pending population change here — the previous frame's jobs have completed, so
+            // disposing/reallocating the NativeArrays is race-free.
+            if (_pendingCount >= 0)
+            {
+                if (_pendingCount != _count)
+                {
+                    Allocate(_pendingCount);
+                    SpawnInit();
+                }
+                _pendingCount = -1;
+            }
+
             if (_count == 0) return;
 
             HandleInput();
@@ -397,37 +432,13 @@ namespace FishSwarm.Core
             if (kb[burstToggleKey].wasPressedThisFrame) useBurst = !useBurst;
         }
 
-        GUIStyle _statsStyle;
-
-        void OnGUI()
-        {
-            if (!showStats) return;
-            if (_statsStyle == null)
-                _statsStyle = new GUIStyle(GUI.skin.label) { fontSize = 16, richText = true };
-
-            float frameMs = Time.smoothDeltaTime * 1000f;
-            double restMs = frameMs - _lastSimMs;
-            string text =
-                $"Fish: <b>{_count}</b>\n" +
-                $"Burst: <b>{(useBurst ? "ON" : "OFF")}</b>   (press [{burstToggleKey}])\n" +
-                $"Mode: <b>{ActiveModeName}</b>   (press [{gridToggleKey}])\n" +
-                $"Neighbour+steer: <b>{_lastSteerMs:F2} ms</b>\n" +
-                $"Sim CPU total: <b>{_lastSimMs:F2} ms</b>\n" +
-                $"Rest (GPU/present): <b>{restMs:F2} ms</b>\n" +
-                $"Frame: <b>{frameMs:F1} ms</b>  ({(frameMs > 0f ? 1000f / frameMs : 0f):F0} fps)";
-
-            GUI.color = Color.black;
-            GUI.Label(new Rect(12, 12, 560, 170), text, _statsStyle);
-            GUI.color = Color.white;
-            GUI.Label(new Rect(11, 11, 560, 170), text, _statsStyle);
-        }
-
         void OnDestroy()
         {
             DisposeArrays();
             if (_stateMaterials != null)
                 foreach (var m in _stateMaterials)
                     if (m != null) Destroy(m);
+            if (_ownsConfig && config != null) Destroy(config);
         }
     }
 }
