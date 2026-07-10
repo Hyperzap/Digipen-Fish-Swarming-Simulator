@@ -10,19 +10,44 @@ namespace FishSwarm.Jobs
     /// Thin Burst-compiled job wrappers around the shared <see cref="FishSteering"/> statics. The
     /// Burst-OFF path calls the very same statics from a main-thread loop, so these jobs add
     /// parallelism + Burst codegen without duplicating any maths.
+    ///
+    /// Grid pipeline: <see cref="BuildCellIndexJob"/> (parallel) -> <see cref="CountingSortJob"/>
+    /// (reorders the data into cell order) -> <see cref="SteeringJob"/> (contiguous neighbour scan).
     /// </summary>
 
     [BurstCompile]
-    public struct BuildGridJob : IJobParallelFor
+    public struct BuildCellIndexJob : IJobParallelFor
     {
         [ReadOnly] public NativeArray<float3> positions;
         public SteeringParams p;
-        public NativeParallelMultiHashMap<int, int>.ParallelWriter grid;
+        [WriteOnly] public NativeArray<int> cellIndex;
 
-        public void Execute(int i)
+        public void Execute(int i) => FishSteering.BuildCellIndex(i, positions, p, cellIndex);
+    }
+
+    [BurstCompile]
+    public struct CountingSortJob : IJob
+    {
+        public int count;
+        public int cellCount;
+        [ReadOnly] public NativeArray<int> cellIndex;
+        public NativeArray<int> cellCounts; // scratch (reused as write cursor)
+        public NativeArray<int> cellStart;  // out (length cellCount + 1)
+
+        [ReadOnly] public NativeArray<float3> srcPos;
+        [ReadOnly] public NativeArray<float3> srcVel;
+        [ReadOnly] public NativeArray<FishState> srcState;
+        [ReadOnly] public NativeArray<float> srcTimer;
+
+        [WriteOnly] public NativeArray<float3> dstPos;
+        [WriteOnly] public NativeArray<float3> dstVel;
+        [WriteOnly] public NativeArray<FishState> dstState;
+        [WriteOnly] public NativeArray<float> dstTimer;
+
+        public void Execute()
         {
-            int3 c = FishSteering.CellCoords(positions[i], p);
-            grid.Add(FishSteering.CellKey(c, p), i);
+            FishSteering.CountingSort(count, cellCount, cellIndex, cellCounts, cellStart,
+                srcPos, srcVel, srcState, srcTimer, dstPos, dstVel, dstState, dstTimer);
         }
     }
 
@@ -36,7 +61,7 @@ namespace FishSwarm.Jobs
         public int predatorCount;
         [ReadOnly] public NativeArray<float3> nodes;
         public int nodeCount;
-        [ReadOnly] public NativeParallelMultiHashMap<int, int> grid;
+        [ReadOnly] public NativeArray<int> cellStart;
         public bool useGrid;
         public SteeringParams p;
 
@@ -47,7 +72,7 @@ namespace FishSwarm.Jobs
         public void Execute(int i)
         {
             FishSteering.Step(i, positions, velocities, states, predators, predatorCount,
-                nodes, nodeCount, grid, useGrid, p, accelerations, nearestNeighborSqr, predatorInRange);
+                nodes, nodeCount, cellStart, useGrid, p, accelerations, nearestNeighborSqr, predatorInRange);
         }
     }
 

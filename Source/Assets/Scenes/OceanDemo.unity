@@ -198,19 +198,6 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &100020003
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 100020000}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30091, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
-  fishManager: {fileID: 100020002}
 --- !u!114 &100020002
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -225,7 +212,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   config: {fileID: 11400000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30042, type: 2}
   bounds: {fileID: 100010002}
-  spawnCount: 100000
+  spawnCount: 1000
   randomSeed: 12345
   spawnRadius: 150
   fishMaterial: {fileID: 2100000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30043, type: 2}
@@ -241,6 +228,20 @@ MonoBehaviour:
   burstToggleKey: 16
   gridToggleKey: 3
   showStats: 1
+--- !u!114 &100020003
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 100020000}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30091, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  fishManager: {fileID: 100020002}
+  configToggleKey: 17
 --- !u!1 &100030000
 GameObject:
   m_ObjectHideFlags: 0
@@ -287,11 +288,20 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30071, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  state: 0
+  fishManager: {fileID: 0}
   threatRadius: 14
+  lungeRange: 8
+  lungeDuration: 0.8
+  recoverDuration: 1.2
+  patrolSpeed: 12
+  chaseSpeed: 18
+  lungeSpeed: 32
+  recoverSpeed: 6
+  turnSharpness: 8
   autoPatrol: 1
   patrolDistance: 55
   patrolAxis: {x: 1, y: 0, z: 0}
-  speed: 12
 --- !u!33 &100030003
 MeshFilter:
   m_ObjectHideFlags: 0
@@ -497,8 +507,18 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4c4ec1a3b59480142a9b004c2937075f, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
+  moveSpeed: 25
+  fastMultiplier: 2.5
+  lookSensitivity: 0.12
+  scrollZoomSpeed: 20
+  predatorFollowDistance: 18
+  predatorFollowHeight: 7
+  predatorFollowSharpness: 8
+  predatorHeadingSharpness: 4
+  predatorLookAhead: 8
+  predatorViewKey: 20
 --- !u!1 &410087039
 GameObject:
   m_ObjectHideFlags: 0

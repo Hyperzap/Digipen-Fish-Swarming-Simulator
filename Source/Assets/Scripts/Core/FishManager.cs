@@ -67,7 +67,15 @@ namespace FishSwarm.Core
         NativeArray<float4x4> _matrices, _sortedMatrices;
         NativeArray<int> _stateStart, _stateCount;
         NativeArray<float3> _predatorPositions, _nodePositions;
-        NativeParallelMultiHashMap<int, int> _grid;
+
+        // Cell-sorted grid: ping-pong buffers (data reordered into cell order each frame) plus the
+        // counting-sort scratch/offsets. Steering reads the sorted B buffers for contiguous access,
+        // then the pair is swapped so the sorted result becomes canonical for next frame.
+        NativeArray<float3> _posB, _velB;
+        NativeArray<FishState> _stateB;
+        NativeArray<float> _timerB;
+        NativeArray<int> _cellIndex, _cellCounts, _cellStart;
+
         int _count, _predatorCount, _nodeCount;
         bool _allocated;
 
@@ -149,7 +157,17 @@ namespace FishSwarm.Core
             _stateCount = new NativeArray<int>(StateCount, Allocator.Persistent);
             _predatorPositions = new NativeArray<float3>(8, Allocator.Persistent);
             _nodePositions = new NativeArray<float3>(8, Allocator.Persistent);
-            _grid = new NativeParallelMultiHashMap<int, int>(cap, Allocator.Persistent);
+
+            _posB = new NativeArray<float3>(cap, Allocator.Persistent);
+            _velB = new NativeArray<float3>(cap, Allocator.Persistent);
+            _stateB = new NativeArray<FishState>(cap, Allocator.Persistent);
+            _timerB = new NativeArray<float>(cap, Allocator.Persistent);
+            _cellIndex = new NativeArray<int>(cap, Allocator.Persistent);
+
+            var p0 = SteeringParams.From(config, bounds.Bounds.center, bounds.Bounds.size);
+            int cellCount = math.max(1, p0.gridDim.x * p0.gridDim.y * p0.gridDim.z);
+            _cellCounts = new NativeArray<int>(cellCount, Allocator.Persistent);
+            _cellStart = new NativeArray<int>(cellCount + 1, Allocator.Persistent);
             _allocated = true;
         }
 
@@ -183,11 +201,13 @@ namespace FishSwarm.Core
             arr = new NativeArray<float3>(Mathf.Max(1, n), Allocator.Persistent);
         }
 
-        void EnsureGridCapacity(int n)
+        void EnsureGridArrays(int cellCount)
         {
-            if (_grid.IsCreated && _grid.Capacity >= n) return;
-            if (_grid.IsCreated) _grid.Dispose();
-            _grid = new NativeParallelMultiHashMap<int, int>(Mathf.Max(1, n), Allocator.Persistent);
+            if (_cellStart.IsCreated && _cellStart.Length >= cellCount + 1) return;
+            if (_cellStart.IsCreated) _cellStart.Dispose();
+            if (_cellCounts.IsCreated) _cellCounts.Dispose();
+            _cellCounts = new NativeArray<int>(cellCount, Allocator.Persistent);
+            _cellStart = new NativeArray<int>(cellCount + 1, Allocator.Persistent);
         }
 
         void DisposeArrays()
@@ -198,7 +218,10 @@ namespace FishSwarm.Core
             _predatorInRange.Dispose(); _matrices.Dispose(); _sortedMatrices.Dispose();
             _stateStart.Dispose(); _stateCount.Dispose();
             _predatorPositions.Dispose(); _nodePositions.Dispose();
-            if (_grid.IsCreated) _grid.Dispose();
+            _posB.Dispose(); _velB.Dispose(); _stateB.Dispose(); _timerB.Dispose();
+            _cellIndex.Dispose();
+            if (_cellCounts.IsCreated) _cellCounts.Dispose();
+            if (_cellStart.IsCreated) _cellStart.Dispose();
             _allocated = false;
         }
 
@@ -279,29 +302,35 @@ namespace FishSwarm.Core
 
         void RunBurst(SteeringParams p, float dt)
         {
-            JobHandle gridH = default;
-            if (useGrid)
-            {
-                EnsureGridCapacity(_count);
-                _grid.Clear();
-                gridH = new BuildGridJob
-                {
-                    positions = _positions,
-                    p = p,
-                    grid = _grid.AsParallelWriter(),
-                }.Schedule(_count, 64);
-            }
+            int cellCount = math.max(1, p.gridDim.x * p.gridDim.y * p.gridDim.z);
+            EnsureGridArrays(cellCount);
 
             _steerTimer.Restart();
+
+            // Cell index (parallel) -> counting sort reorders A into cell-order B (single thread).
+            var indexH = new BuildCellIndexJob
+            {
+                positions = _positions, p = p, cellIndex = _cellIndex,
+            }.Schedule(_count, 64);
+
+            var sortH = new CountingSortJob
+            {
+                count = _count, cellCount = cellCount, cellIndex = _cellIndex,
+                cellCounts = _cellCounts, cellStart = _cellStart,
+                srcPos = _positions, srcVel = _velocities, srcState = _states, srcTimer = _stateTimer,
+                dstPos = _posB, dstVel = _velB, dstState = _stateB, dstTimer = _timerB,
+            }.Schedule(indexH);
+
+            // Steering over the cell-sorted buffers — contiguous neighbour reads.
             var steerH = new SteeringJob
             {
-                positions = _positions, velocities = _velocities, states = _states,
+                positions = _posB, velocities = _velB, states = _stateB,
                 predators = _predatorPositions, predatorCount = _predatorCount,
                 nodes = _nodePositions, nodeCount = _nodeCount,
-                grid = _grid, useGrid = useGrid, p = p,
+                cellStart = _cellStart, useGrid = useGrid, p = p,
                 accelerations = _accelerations, nearestNeighborSqr = _nearestNeighborSqr,
                 predatorInRange = _predatorInRange,
-            }.Schedule(_count, 64, gridH);
+            }.Schedule(_count, 64, sortH);
             steerH.Complete();
             _steerTimer.Stop();
             _lastSteerMs = _steerTimer.Elapsed.TotalMilliseconds;
@@ -309,45 +338,55 @@ namespace FishSwarm.Core
             int buckets = Mathf.Max(1, config.behaviorTickBuckets);
             var behaviorH = new BehaviorJob
             {
-                positions = _positions, nearestNeighborSqr = _nearestNeighborSqr,
+                positions = _posB, nearestNeighborSqr = _nearestNeighborSqr,
                 predatorInRange = _predatorInRange, nodes = _nodePositions, nodeCount = _nodeCount,
-                states = _states, stateTimer = _stateTimer, p = p,
+                states = _stateB, stateTimer = _timerB, p = p,
                 frameBucket = Time.frameCount % buckets, buckets = buckets,
                 tickDt = dt * buckets, frameSeed = (uint)(Time.frameCount * 9781 + 1),
             }.Schedule(_count, 64);
 
-            // Integrate must run after behaviour (behaviour reads positions; integrate writes them).
+            // Integrate must run after behaviour (behaviour reads posB; integrate writes it).
             var integrateH = new IntegrateJob
             {
-                positions = _positions, velocities = _velocities, accelerations = _accelerations,
+                positions = _posB, velocities = _velB, accelerations = _accelerations,
                 matrices = _matrices, dt = dt, p = p, scale = fishScale,
             }.Schedule(_count, 64, behaviorH);
 
             new BucketByStateJob
             {
-                count = _count, states = _states, matrices = _matrices,
+                count = _count, states = _stateB, matrices = _matrices,
                 sorted = _sortedMatrices, stateStart = _stateStart, stateCount = _stateCount,
             }.Schedule(integrateH).Complete();
+
+            SwapBuffers();
+        }
+
+        // Swap the ping-pong pair: the processed cell-sorted B buffers become canonical for next frame.
+        void SwapBuffers()
+        {
+            (_positions, _posB) = (_posB, _positions);
+            (_velocities, _velB) = (_velB, _velocities);
+            (_states, _stateB) = (_stateB, _states);
+            (_stateTimer, _timerB) = (_timerB, _stateTimer);
         }
 
         void RunManaged(SteeringParams p, float dt)
         {
-            if (useGrid)
-            {
-                EnsureGridCapacity(_count);
-                _grid.Clear();
-                for (int i = 0; i < _count; i++)
-                {
-                    int3 c = FishSteering.CellCoords(_positions[i], p);
-                    _grid.Add(FishSteering.CellKey(c, p), i);
-                }
-            }
+            int cellCount = math.max(1, p.gridDim.x * p.gridDim.y * p.gridDim.z);
+            EnsureGridArrays(cellCount);
 
             _steerTimer.Restart();
+
+            for (int i = 0; i < _count; i++)
+                FishSteering.BuildCellIndex(i, _positions, p, _cellIndex);
+
+            FishSteering.CountingSort(_count, cellCount, _cellIndex, _cellCounts, _cellStart,
+                _positions, _velocities, _states, _stateTimer, _posB, _velB, _stateB, _timerB);
+
             for (int i = 0; i < _count; i++)
             {
-                FishSteering.Step(i, _positions, _velocities, _states, _predatorPositions, _predatorCount,
-                    _nodePositions, _nodeCount, _grid, useGrid, p, _accelerations, _nearestNeighborSqr, _predatorInRange);
+                FishSteering.Step(i, _posB, _velB, _stateB, _predatorPositions, _predatorCount,
+                    _nodePositions, _nodeCount, _cellStart, useGrid, p, _accelerations, _nearestNeighborSqr, _predatorInRange);
             }
             _steerTimer.Stop();
             _lastSteerMs = _steerTimer.Elapsed.TotalMilliseconds;
@@ -358,16 +397,18 @@ namespace FishSwarm.Core
             uint seed = (uint)(Time.frameCount * 9781 + 1);
             for (int i = frameBucket; i < _count; i += buckets)
             {
-                FishSteering.TickBehavior(i, _positions, _nearestNeighborSqr, _predatorInRange,
-                    _nodePositions, _nodeCount, _states, _stateTimer, p, tickDt, seed);
+                FishSteering.TickBehavior(i, _posB, _nearestNeighborSqr, _predatorInRange,
+                    _nodePositions, _nodeCount, _stateB, _timerB, p, tickDt, seed);
             }
 
             for (int i = 0; i < _count; i++)
             {
-                FishSteering.Integrate(i, _positions, _velocities, _accelerations, _matrices, dt, p, fishScale);
+                FishSteering.Integrate(i, _posB, _velB, _accelerations, _matrices, dt, p, fishScale);
             }
 
-            FishSteering.BucketByState(_count, _states, _matrices, _sortedMatrices, _stateStart, _stateCount);
+            FishSteering.BucketByState(_count, _stateB, _matrices, _sortedMatrices, _stateStart, _stateCount);
+
+            SwapBuffers();
         }
 
         void SnapshotThreatsAndNodes()

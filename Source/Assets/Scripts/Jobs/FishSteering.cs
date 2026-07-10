@@ -12,9 +12,11 @@ namespace FishSwarm.Jobs
     /// from a scheduled <c>[BurstCompile]</c> job (Burst ON), and as plain single-threaded IL when
     /// called from a main-thread loop (Burst OFF) — one implementation, honest comparison.
     ///
-    /// Neighbour data lives in a <see cref="NativeParallelMultiHashMap{TKey,TValue}"/> keyed by a
-    /// collision-free cell index (grid is bounded to the ocean volume, cell size = perception
-    /// radius, so the 3×3×3 neighbourhood covers the radius).
+    /// The grid is a <b>counting sort</b>: fish are bucketed into a bounded, collision-free cell
+    /// index (cell size = perception radius) and the position/velocity/state arrays are physically
+    /// <b>reordered into cell order</b> each frame. A neighbour scan then reads a contiguous run of
+    /// memory per cell instead of chasing scattered indices — the fix for the memory-bandwidth-bound
+    /// neighbour query. <see cref="CellKey"/> is unique per cell so runs never collide.
     /// </summary>
     public static class FishSteering
     {
@@ -29,6 +31,46 @@ namespace FishSwarm.Jobs
         public static int CellKey(int3 c, in SteeringParams p)
         {
             return c.x + p.gridDim.x * (c.y + p.gridDim.y * c.z);
+        }
+
+        /// <summary>Per-fish: compute the flattened cell index of a position (parallel-safe).</summary>
+        public static void BuildCellIndex(int i,
+            in NativeArray<float3> positions, in SteeringParams p, NativeArray<int> cellIndex)
+        {
+            cellIndex[i] = CellKey(CellCoords(positions[i], p), p);
+        }
+
+        /// <summary>
+        /// Counting sort: from <paramref name="cellIndex"/>, build per-cell start offsets
+        /// (<paramref name="cellStart"/>, length cellCount+1) and scatter the source arrays into
+        /// cell order in the destination arrays. Single-threaded, two O(n) passes + O(cellCount).
+        /// <paramref name="cellCounts"/> (length cellCount) is scratch, reused as the write cursor.
+        /// </summary>
+        public static void CountingSort(int count, int cellCount,
+            in NativeArray<int> cellIndex,
+            NativeArray<int> cellCounts, NativeArray<int> cellStart,
+            in NativeArray<float3> srcPos, in NativeArray<float3> srcVel,
+            in NativeArray<FishState> srcState, in NativeArray<float> srcTimer,
+            NativeArray<float3> dstPos, NativeArray<float3> dstVel,
+            NativeArray<FishState> dstState, NativeArray<float> dstTimer)
+        {
+            for (int c = 0; c < cellCount; c++) cellCounts[c] = 0;
+            for (int i = 0; i < count; i++) cellCounts[cellIndex[i]]++;
+
+            int acc = 0;
+            for (int c = 0; c < cellCount; c++) { cellStart[c] = acc; acc += cellCounts[c]; }
+            cellStart[cellCount] = acc;
+
+            for (int c = 0; c < cellCount; c++) cellCounts[c] = cellStart[c]; // reuse as write cursor
+            for (int i = 0; i < count; i++)
+            {
+                int c = cellIndex[i];
+                int slot = cellCounts[c]++;
+                dstPos[slot] = srcPos[i];
+                dstVel[slot] = srcVel[i];
+                dstState[slot] = srcState[i];
+                dstTimer[slot] = srcTimer[i];
+            }
         }
 
         // ---- Neighbour accumulation --------------------------------------------------------
@@ -67,19 +109,18 @@ namespace FishSwarm.Jobs
             return false;
         }
 
-        static bool ScanCell(ref Accum a, int key, float3 myPos, float3 forward, int self,
-            NativeParallelMultiHashMap<int, int> grid,
+        // Scan a cell's contiguous run of fish (cell-sorted arrays). Sequential memory reads.
+        static bool ScanCell(ref Accum a, int cellKey, float3 myPos, float3 forward, int self,
+            in NativeArray<int> cellStart,
             in NativeArray<float3> pos, in NativeArray<float3> vel,
             float perSqr, float sepSqr, int maxN, in SteeringParams p)
         {
-            if (grid.TryGetFirstValue(key, out int j, out var it))
+            int start = cellStart[cellKey];
+            int end = cellStart[cellKey + 1];
+            for (int k = start; k < end; k++)
             {
-                do
-                {
-                    if (j != self && AddNeighbor(ref a, myPos, forward, j, pos, vel, perSqr, sepSqr, maxN, p))
-                        return true;
-                }
-                while (grid.TryGetNextValue(out j, ref it));
+                if (k != self && AddNeighbor(ref a, myPos, forward, k, pos, vel, perSqr, sepSqr, maxN, p))
+                    return true;
             }
             return false;
         }
@@ -150,14 +191,14 @@ namespace FishSwarm.Jobs
             return nearest;
         }
 
-        // ---- Per-fish steering step --------------------------------------------------------
+        // ---- Per-fish steering step (arrays are cell-sorted; i is a sorted slot) -----------
 
         public static void Step(int i,
             in NativeArray<float3> positions, in NativeArray<float3> velocities,
             in NativeArray<FishState> states,
             in NativeArray<float3> predators, int predatorCount,
             in NativeArray<float3> nodes, int nodeCount,
-            NativeParallelMultiHashMap<int, int> grid, bool useGrid,
+            in NativeArray<int> cellStart, bool useGrid,
             in SteeringParams p,
             NativeArray<float3> accelerations,
             NativeArray<float> nearestNeighborSqr,
@@ -178,7 +219,7 @@ namespace FishSwarm.Jobs
             {
                 // Own cell first (closest, symmetric), then the 26 neighbours; early-out at the cap.
                 int3 cc = CellCoords(myPos, p);
-                bool done = ScanCell(ref a, CellKey(cc, p), myPos, forward, i, grid, positions, velocities, perSqr, sepSqr, maxN, p);
+                bool done = ScanCell(ref a, CellKey(cc, p), myPos, forward, i, cellStart, positions, velocities, perSqr, sepSqr, maxN, p);
                 for (int dz = -1; dz <= 1 && !done; dz++)
                 for (int dy = -1; dy <= 1 && !done; dy++)
                 for (int dx = -1; dx <= 1 && !done; dx++)
@@ -186,7 +227,7 @@ namespace FishSwarm.Jobs
                     if ((dx | dy | dz) == 0) continue; // centre already scanned
                     int3 nc = cc + new int3(dx, dy, dz);
                     if (math.any(nc < 0) || math.any(nc >= p.gridDim)) continue;
-                    done = ScanCell(ref a, CellKey(nc, p), myPos, forward, i, grid, positions, velocities, perSqr, sepSqr, maxN, p);
+                    done = ScanCell(ref a, CellKey(nc, p), myPos, forward, i, cellStart, positions, velocities, perSqr, sepSqr, maxN, p);
                 }
             }
             else

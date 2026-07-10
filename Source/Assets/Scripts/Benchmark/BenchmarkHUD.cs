@@ -20,9 +20,10 @@ namespace FishSwarm.Benchmark
         const int Samples = 120;
         readonly float[] _frameMs = new float[Samples];
         readonly float[] _simMs = new float[Samples];
+        readonly float[] _steerMs = new float[Samples];
         int _head;
 
-        Rect _statsWin = new Rect(10, 10, 340, 250);
+        Rect _statsWin = new Rect(10, 10, 360, 300);
         Rect _configWin = new Rect(360, 10, 330, 470);
         bool _showConfig;
 
@@ -56,7 +57,22 @@ namespace FishSwarm.Benchmark
 
             _frameMs[_head] = Time.unscaledDeltaTime * 1000f;
             _simMs[_head] = fishManager != null ? (float)fishManager.LastSimMs : 0f;
+            _steerMs[_head] = fishManager != null ? (float)fishManager.LastNeighborQueryMs : 0f;
             _head = (_head + 1) % Samples;
+        }
+
+        static float Mean(float[] a)
+        {
+            float s = 0f;
+            for (int i = 0; i < a.Length; i++) s += a[i];
+            return s / a.Length;
+        }
+
+        static float Max(float[] a)
+        {
+            float m = 0f;
+            for (int i = 0; i < a.Length; i++) if (a[i] > m) m = a[i];
+            return m;
         }
 
         void CaptureSnapshot()
@@ -96,23 +112,42 @@ namespace FishSwarm.Benchmark
 
         void DrawStatsWindow(int id)
         {
-            float frameMs = Time.smoothDeltaTime * 1000f;
-            float fps = frameMs > 0f ? 1000f / frameMs : 0f;
-            double sim = fishManager.LastSimMs;
-            double steer = fishManager.LastNeighborQueryMs;
-            double rest = frameMs - sim;
+            int last = (_head - 1 + Samples) % Samples; // most recent sample
+            float avgFrame = Mean(_frameMs);
 
             GUILayout.Label($"Fish: <b>{fishManager.Count:n0}</b>", _label);
             GUILayout.Label($"Burst: <b>{(fishManager.UseBurst ? "ON" : "OFF")}</b>   Mode: <b>{fishManager.ActiveModeName}</b>", _label);
-            GUILayout.Label($"Neighbour+steer: <b>{steer:F2} ms</b>", _label);
-            GUILayout.Label($"Sim CPU: <b>{sim:F2} ms</b>   Rest: <b>{rest:F2} ms</b>", _label);
-            GUILayout.Label($"Frame: <b>{frameMs:F1} ms</b>  (<b>{fps:F0} fps</b>)", _label);
 
-            Rect graph = GUILayoutUtility.GetRect(320, 92);
+            // Header + now/avg/max rows — averages are what to compare across optimizations.
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("", _label, GUILayout.Width(118));
+            GUILayout.Label("now", _label, GUILayout.Width(52));
+            GUILayout.Label("avg", _label, GUILayout.Width(50));
+            GUILayout.Label("max", _label, GUILayout.Width(50));
+            GUILayout.EndHorizontal();
+
+            MetricRow("Frame ms", _frameMs[last], _frameMs);
+            MetricRow("Sim CPU ms", _simMs[last], _simMs);
+            MetricRow("Steer ms", _steerMs[last], _steerMs);
+
+            GUILayout.Label($"FPS: now <b>{(_frameMs[last] > 0f ? 1000f / _frameMs[last] : 0f):F1}</b>   " +
+                            $"avg <b>{(avgFrame > 0f ? 1000f / avgFrame : 0f):F1}</b>", _label);
+
+            Rect graph = GUILayoutUtility.GetRect(330, 92);
             DrawGraph(graph);
-            GUILayout.Label("<size=10>bars = frame time · cyan = sim CPU · line = 60 fps</size>", _label);
+            GUILayout.Label($"<size=10>bars = frame · cyan = sim CPU · line = 60 fps · avg over {Samples} frames (~{Samples / Mathf.Max(1f, 1000f / avgFrame):0.0}s)</size>", _label);
 
             GUI.DragWindow(new Rect(0, 0, 10000, 20));
+        }
+
+        void MetricRow(string name, float now, float[] buffer)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(name, _label, GUILayout.Width(118));
+            GUILayout.Label($"<b>{now:F2}</b>", _label, GUILayout.Width(52));
+            GUILayout.Label($"{Mean(buffer):F2}", _label, GUILayout.Width(50));
+            GUILayout.Label($"{Max(buffer):F2}", _label, GUILayout.Width(50));
+            GUILayout.EndHorizontal();
         }
 
         void DrawConfigWindow(int id)
@@ -160,7 +195,7 @@ namespace FishSwarm.Benchmark
                 c.cohesionAxisWeights = a;
 
                 GUILayout.Space(8);
-                if (GUILayout.Button("Reset weights to start-of-play"))
+                if (GUILayout.Button("Reset weights to start-of-sim"))
                     ApplySnapshot();
             }
 
