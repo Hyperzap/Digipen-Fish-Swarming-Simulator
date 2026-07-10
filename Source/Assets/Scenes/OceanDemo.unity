@@ -347,7 +347,7 @@ GameObject:
   - component: {fileID: 330585545}
   - component: {fileID: 330585544}
   - component: {fileID: 330585547}
-  - component: {fileID: 330585548}
+  - component: {fileID: 330585549}
   m_Layer: 0
   m_Name: Main Camera
   m_TagString: MainCamera
@@ -473,7 +473,7 @@ MonoBehaviour:
     m_VarianceClampScale: 0.9
     m_ContrastAdaptiveSharpening: 0
   m_Version: 2
---- !u!114 &330585548
+--- !u!114 &330585549
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -482,13 +482,9 @@ MonoBehaviour:
   m_GameObject: {fileID: 330585543}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30022, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  target: {fileID: 100010001}
-  radius: 65
-  height: 20
-  degreesPerSecond: 8
+  m_Script: {fileID: 11500000, guid: 4c4ec1a3b59480142a9b004c2937075f, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
 --- !u!1 &410087039
 GameObject:
   m_ObjectHideFlags: 0
