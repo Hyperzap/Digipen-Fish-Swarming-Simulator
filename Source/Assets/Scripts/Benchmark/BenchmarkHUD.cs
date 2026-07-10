@@ -124,6 +124,7 @@ namespace FishSwarm.Benchmark
             GUILayout.Label($"Burst: <b>{(fishManager.UseBurst ? "ON" : "OFF")}</b>   Mode: <b>{fishManager.ActiveModeName}</b>", _label);
             GUILayout.Label($"Render: <b>{fishManager.RenderModeName}</b>   ([G] toggle)", _label);
             GUILayout.Label($"Sim LOD: <b>{(fishManager.UseLod ? "ON" : "OFF")}</b>   ([L] toggle)", _label);
+            GUILayout.Label($"Backend: <b>{fishManager.SimModeName}</b>   ([J] CPU/GPU)", _label);
 
             // Header + now/avg/max rows — averages are what to compare across optimizations.
             GUILayout.BeginHorizontal();
@@ -177,6 +178,8 @@ namespace FishSwarm.Benchmark
                 fishManager.SetGrid(!fishManager.UseGrid);
             if (GUILayout.Button(fishManager.UseLod ? "LOD: ON" : "LOD: OFF"))
                 fishManager.SetLod(!fishManager.UseLod);
+            if (GUILayout.Button(fishManager.UseGpu ? "Sim: GPU" : "Sim: CPU"))
+                fishManager.SetGpu(!fishManager.UseGpu);
             GUILayout.EndHorizontal();
 
             if (c != null)

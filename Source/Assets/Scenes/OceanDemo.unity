@@ -212,7 +212,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   config: {fileID: 11400000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30042, type: 2}
   bounds: {fileID: 100010002}
-  spawnCount: 300000
+  spawnCount: 1000000
   randomSeed: 12345
   spawnRadius: 150
   fishMaterial: {fileID: 2100000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30043, type: 2}
@@ -228,10 +228,13 @@ MonoBehaviour:
   useGrid: 1
   burstToggleKey: 16
   gridToggleKey: 3
-  useIndirectRender: 0
+  useIndirectRender: 1
   indirectToggleKey: 21
-  useLod: 0
+  useLod: 1
   lodToggleKey: 26
+  simCompute: {fileID: 7200000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f300b1, type: 3}
+  useGpu: 1
+  gpuToggleKey: 24
   showStats: 1
 --- !u!114 &100020003
 MonoBehaviour:

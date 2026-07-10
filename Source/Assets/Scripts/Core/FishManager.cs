@@ -66,6 +66,14 @@ namespace FishSwarm.Core
         [Tooltip("Simulation LOD: distant fish re-run the neighbour scan every Nth frame (sim-only).")]
         public bool useLod = false;
         public Key lodToggleKey = Key.L;
+
+        [Header("GPU compute simulation (Milestone 1: drift only)")]
+        [Tooltip("FishSim.compute — enables the GPU backend. If unset, GPU mode is unavailable.")]
+        public ComputeShader simCompute;
+        [Tooltip("Run the whole sim on the GPU (path to 1M). Keeps the CPU Burst path as a toggle.")]
+        public bool useGpu = false;
+        public Key gpuToggleKey = Key.J;
+
         public bool showStats = true;
 
         // Simulation state (NativeArrays, Persistent).
@@ -99,11 +107,18 @@ namespace FishSwarm.Core
         Material _indirectMaterial;
         RenderParams _indirectRenderParams;
 
+        // GPU compute backend (owns its own GPU buffers). Null if no compute shader assigned.
+        FishGpuSimulator _gpu;
+        bool _modeChanged;
+
         int _count, _predatorCount, _nodeCount;
         bool _allocated;
 
         // Indirect only when explicitly enabled AND the material compiled.
         bool RenderIndirect => useIndirectRender && _indirectMaterial != null;
+
+        // GPU sim runs only when enabled AND available (compute assigned + indirect material compiled).
+        public bool UseGpuSim => useGpu && _gpu != null && _indirectMaterial != null;
 
         // Rendering.
         Mesh _fishMesh;
@@ -125,6 +140,8 @@ namespace FishSwarm.Core
         public bool UseLod => useLod;
         public string ActiveModeName => useGrid ? "Uniform Grid" : "Naive O(n^2)";
         public string RenderModeName => RenderIndirect ? "GPU Indirect" : "Instanced";
+        public string SimModeName => UseGpuSim ? "GPU Compute" : (useBurst ? "CPU Burst" : "CPU 1-thread");
+        public bool UseGpu => useGpu;
         public double LastSimMs => _lastSimMs;
         public double LastNeighborQueryMs => _lastSteerMs;
         public FishConfig Config => config;
@@ -135,6 +152,7 @@ namespace FishSwarm.Core
         /// <summary>Toggle helpers so UI buttons can mirror the B / Tab keys.</summary>
         public void SetBurst(bool on) => useBurst = on;
         public void SetGrid(bool on) => useGrid = on;
+        public void SetGpu(bool on) { if (on == useGpu) return; useGpu = on; _modeChanged = true; }
         public void SetLod(bool on) => useLod = on;
 
         bool _ownsConfig;
@@ -161,6 +179,12 @@ namespace FishSwarm.Core
             }
 
             BuildRenderResources();
+            if (simCompute != null)
+            {
+                // A broken compute shader must not take down the CPU path — degrade to CPU-only.
+                try { _gpu = new FishGpuSimulator(simCompute); }
+                catch (System.Exception e) { Debug.LogError($"[FishManager] GPU sim unavailable: {e.Message}"); _gpu = null; }
+            }
             Allocate(spawnCount);
             SpawnInit();
         }
@@ -171,7 +195,10 @@ namespace FishSwarm.Core
         {
             DisposeArrays();
             _count = Mathf.Max(0, n);
-            int cap = Mathf.Max(1, _count);
+            bool gpu = UseGpuSim;
+            // In GPU mode the CPU arrays are unused (the sim lives on the GPU), so keep them at 1 to
+            // avoid hundreds of MB of wasted RAM + a huge CPU seed loop at 1M fish.
+            int cap = gpu ? 1 : Mathf.Max(1, _count);
 
             _positions = new NativeArray<float3>(cap, Allocator.Persistent);
             _velocities = new NativeArray<float3>(cap, Allocator.Persistent);
@@ -198,7 +225,7 @@ namespace FishSwarm.Core
             // Only gridDim is needed here (for cell-array sizing), so LOD/camera args are irrelevant.
             var p0 = SteeringParams.From(config, bounds.Bounds.center, bounds.Bounds.size,
                 bounds.Bounds.center, false, 0);
-            int cellCount = math.max(1, p0.gridDim.x * p0.gridDim.y * p0.gridDim.z);
+            int cellCount = gpu ? 1 : math.max(1, p0.gridDim.x * p0.gridDim.y * p0.gridDim.z);
             _cellCounts = new NativeArray<int>(cellCount, Allocator.Persistent);
             _cellStart = new NativeArray<int>(cellCount + 1, Allocator.Persistent);
 
@@ -207,11 +234,17 @@ namespace FishSwarm.Core
             _instanceBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, cap, InstanceStride);
             if (_indirectMaterial != null) _indirectMaterial.SetBuffer("_Instances", _instanceBuffer);
 
+            // GPU backend owns its own (full-size) buffers and seeds them on the GPU.
+            if (gpu) _gpu.Allocate(_count, bounds.Bounds, config, spawnRadius, randomSeed);
+            else _gpu?.Release();
+
             _allocated = true;
         }
 
         void SpawnInit()
         {
+            if (UseGpuSim) { _schoolCenter = bounds.Bounds.center; return; } // GPU seeds itself
+
             Random.State prev = Random.state;
             if (randomSeed != 0) Random.InitState(randomSeed);
 
@@ -336,21 +369,23 @@ namespace FishSwarm.Core
 
         void Update()
         {
-            // Apply a pending population change here — the previous frame's jobs have completed, so
-            // disposing/reallocating the NativeArrays is race-free.
-            if (_pendingCount >= 0)
+            HandleInput();
+
+            // Apply a pending population change OR a sim-mode switch here — the previous frame's jobs
+            // have completed, so disposing/reallocating is race-free. A mode change forces a realloc
+            // even at the same count (CPU arrays resize 1<->full; GPU buffers (de)allocate).
+            if (_pendingCount >= 0 || _modeChanged)
             {
-                if (_pendingCount != _count)
-                {
-                    Allocate(_pendingCount);
-                    SpawnInit();
-                }
+                Allocate(_pendingCount >= 0 ? _pendingCount : _count);
+                SpawnInit();
                 _pendingCount = -1;
+                _modeChanged = false;
             }
 
             if (_count == 0) return;
 
-            HandleInput();
+            if (UseGpuSim) { UpdateGpu(); return; }
+
             SnapshotThreatsAndNodes();
 
             if (_camera == null) _camera = Camera.main;
@@ -368,6 +403,47 @@ namespace FishSwarm.Core
 
             UpdateSchoolCenter();
             RenderFish();
+        }
+
+        readonly Vector4[] _gpuPredators = new Vector4[16];
+
+        void UpdateGpu()
+        {
+            if (_gpu == null || !_gpu.IsAllocated) return;
+
+            // Snapshot predator positions for the GPU threat pass.
+            var preds = Predator.All;
+            int pc = Mathf.Min(preds.Count, _gpuPredators.Length);
+            for (int i = 0; i < pc; i++)
+            {
+                Vector3 pp = preds[i].transform.position;
+                _gpuPredators[i] = new Vector4(pp.x, pp.y, pp.z, 0f);
+            }
+
+            if (_camera == null) _camera = Camera.main;
+            Vector3 camPos = _camera != null ? _camera.transform.position : bounds.Bounds.center;
+
+            float dt = Time.deltaTime;
+            _simTimer.Restart();
+            _gpu.Step(bounds.Bounds, config, dt, _gpuPredators, pc, camPos, useLod, Time.frameCount);
+            _simTimer.Stop();
+            _lastSimMs = _simTimer.Elapsed.TotalMilliseconds;
+            _lastSteerMs = 0;
+            _schoolCenter = _gpu.SchoolCenter; // async GPU centroid reduction (1–2 frames latent)
+
+            RenderGpu();
+        }
+
+        void RenderGpu()
+        {
+            _indirectMaterial.SetBuffer("_Instances", _gpu.Instances);
+            _argsData[0].indexCountPerInstance = _fishMesh.GetIndexCount(0);
+            _argsData[0].instanceCount = (uint)_gpu.Count;
+            _argsData[0].startIndex = _fishMesh.GetIndexStart(0);
+            _argsData[0].baseVertexIndex = _fishMesh.GetBaseVertex(0);
+            _argsData[0].startInstance = 0;
+            _argsBuffer.SetData(_argsData);
+            Graphics.RenderMeshIndirect(_indirectRenderParams, _fishMesh, _argsBuffer, 1);
         }
 
         void RunBurst(SteeringParams p, float dt)
@@ -569,6 +645,7 @@ namespace FishSwarm.Core
 
         void UpdateSchoolCenter()
         {
+            if (UseGpuSim) { _schoolCenter = bounds.Bounds.center; return; } // CPU arrays are size-1 in GPU mode
             if (_count == 0)
             {
                 _schoolCenter = bounds != null ? bounds.Bounds.center : Vector3.zero;
@@ -598,6 +675,8 @@ namespace FishSwarm.Core
             if (kb[indirectToggleKey].wasPressedThisFrame && _indirectMaterial != null)
                 useIndirectRender = !useIndirectRender;
             if (kb[lodToggleKey].wasPressedThisFrame) useLod = !useLod;
+            if (kb[gpuToggleKey].wasPressedThisFrame && _gpu != null && _indirectMaterial != null)
+                SetGpu(!useGpu);
         }
 
         void OnDestroy()
@@ -610,6 +689,7 @@ namespace FishSwarm.Core
             _instanceBuffer?.Release();
             _argsBuffer?.Release();
             if (_indirectMaterial != null) Destroy(_indirectMaterial);
+            _gpu?.Release();
         }
     }
 }
