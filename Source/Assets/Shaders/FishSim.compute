@@ -17,6 +17,7 @@
 #pragma kernel Scatter
 #pragma kernel StepSorted
 #pragma kernel ReducePositions
+#pragma kernel SamplePositions
 
 #define TABLE_SIZE 1048576u   // 2^20 buckets
 #define TABLE_MASK 1048575u   // TABLE_SIZE - 1
@@ -37,7 +38,9 @@ RWStructuredBuffer<float4> _Accel;       // carried acceleration (LOD), ping-pon
 RWStructuredBuffer<float4> _SortedAccel;
 RWStructuredBuffer<FishInstance> _Instances;
 StructuredBuffer<float4>   _Predators;   // predator positions (xyz), uploaded from CPU
+StructuredBuffer<float4>   _Nodes;       // foraging node positions (xyz), uploaded from CPU
 RWStructuredBuffer<float4> _Partials;    // per-group position sums for the centroid reduction
+RWStructuredBuffer<float4> _Samples;     // strided spatial sample of fish positions (read back for predator cluster targeting)
 
 // Grid.
 RWStructuredBuffer<uint> _CellCounts;   // per bucket (kept for query ranges)
@@ -58,6 +61,8 @@ float3 _GridOrigin;
 float _CellSize;
 float _PerceptionSqr;
 uint  _NumBlocks;
+uint  _SampleCount;
+uint  _SampleStride;
 
 // Steering (M3).
 float _SeparationRadiusSqr;
@@ -73,7 +78,11 @@ float _BoundaryMargin;
 uint  _PredatorCount;
 float _PredatorFleeRadius, _ThreatWeight;
 float _RegroupNeighborDistance;
-float3 _SchoolingSAC, _FleeingSAC, _RegroupingSAC;
+float3 _SchoolingSAC, _FleeingSAC, _RegroupingSAC, _ForagingSAC;
+
+// Foraging (M4b): unthreatened fish near a seabed node may break off to peck at it.
+uint  _NodeCount;
+float _ForagingNodeRadiusSqr, _ForagingChancePerFrame, _ForagingDuration, _ForagingWeight;
 
 // Simulation LOD (M5). Far fish reuse carried acceleration on off-phase frames.
 uint  _LodEnabled;
@@ -259,7 +268,23 @@ float3 SacFor(uint state)
 {
     if (state == 1u) return _FleeingSAC;
     if (state == 2u) return _RegroupingSAC;
+    if (state == 3u) return _ForagingSAC;
     return _SchoolingSAC; // Schooling (0) / default
+}
+
+// Nearest foraging node within range; -1 if none. Used for both the pull force and the FSM's
+// "am I near food?" test.
+int NearestNode(float3 pos)
+{
+    int best = -1;
+    float bestSqr = _ForagingNodeRadiusSqr;
+    for (uint n = 0; n < _NodeCount; n++)
+    {
+        float3 off = _Nodes[n].xyz - pos;
+        float d2 = dot(off, off);
+        if (d2 < bestSqr) { bestSqr = d2; best = (int)n; }
+    }
+    return best;
 }
 
 // Strong repulsion from nearby predators; reports whether any predator is in flee range.
@@ -309,6 +334,7 @@ void StepSorted(uint3 id : SV_DispatchThreadID)
     float3 pos = _SortedPos[s].xyz;
     float3 vel = _SortedVel[s].xyz;
     uint state = (uint)_SortedPos[s].w; // state packed in position.w
+    float timer = _SortedVel[s].w;      // foraging duration timer packed in velocity.w
     float3 forward = (dot(vel, vel) > 1e-8) ? normalize(vel) : float3(0, 0, 1);
     int3 cc = CellCoord(pos);
 
@@ -352,14 +378,44 @@ void StepSorted(uint3 id : SV_DispatchThreadID)
         bool predatorInRange;
         force += Threat(pos, vel, predatorInRange);
 
-        // FSM (predator pressure always wins). Foraging omitted — no nodes.
+        // Foraging pull toward the nearest node (uses the incoming state, like the CPU steering pass,
+        // so a fish that transitions to Foraging this frame starts pulling next frame).
+        int node = NearestNode(pos);
+        if (state == 3u && node >= 0)
+            force += Steer(_Nodes[node].xyz - pos, vel) * _ForagingWeight;
+
+        // FSM (port of FiniteStateMachine.Tick; predator pressure always wins). This pass runs every
+        // full frame, so the foraging timer accrues _Dt (not a staggered tick dt) and the trigger
+        // uses a per-frame chance (foragingChancePerTick / behaviorTickBuckets, set on the CPU).
         uint newState;
-        if (predatorInRange) newState = 1u;
-        else if (state == 1u) newState = 2u;
-        else if (state == 2u) newState = (sqrt(nearestSqr) < _RegroupNeighborDistance) ? 0u : 2u;
-        else newState = 0u;
+        float newTimer = timer;
+        if (predatorInRange)
+        {
+            newState = 1u;                       // -> Fleeing
+        }
+        else if (state == 1u)
+        {
+            newState = 2u;                       // Fleeing -> Regrouping
+        }
+        else if (state == 2u)
+        {
+            newState = (sqrt(nearestSqr) < _RegroupNeighborDistance) ? 0u : 2u; // Regrouping -> Schooling
+        }
+        else if (state == 3u)
+        {
+            newTimer = timer + _Dt;              // Foraging: leave on timeout or if the node is gone
+            newState = (newTimer > _ForagingDuration || node < 0) ? 0u : 3u;
+        }
+        else
+        {
+            // Schooling: near food + a passed roll breaks the fish off to forage.
+            float roll = hash11(s * 2654435761u + (uint)_Frame * 40503u + _Seed + 1u);
+            newState = (node >= 0 && roll < _ForagingChancePerFrame) ? 3u : 0u;
+        }
+        if (newState != state) newTimer = 0.0; // reset the timer on any state change
 
         state = newState;
+        timer = newTimer;
         _SortedAccel[s] = float4(force, 0); // remember for future skipped frames
     }
     else
@@ -374,7 +430,7 @@ void StepSorted(uint3 id : SV_DispatchThreadID)
     pos += vel * _Dt;
 
     _SortedPos[s] = float4(pos, (float)state); // keep state packed in .w for next frame
-    _SortedVel[s] = float4(vel, 0);
+    _SortedVel[s] = float4(vel, timer);        // keep the foraging timer packed in .w
 
     float3 f = (length(vel) > 1e-5) ? normalize(vel) : float3(0, 0, 1);
     FishInstance inst;
@@ -402,4 +458,18 @@ void ReducePositions(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint3
     }
 
     if (t == 0u) _Partials[gid.x] = float4(gSum[0], 0);
+}
+
+// ---- Spatial sample (strided over the cell-sorted buffer, so samples spread across the volume) --
+// A small fixed-size sample of fish positions read back to the CPU each frame. The predator uses it
+// to aim at the nearest sub-group's centroid instead of the whole-school mean (which sits in the
+// empty gap when the school splits). Sampling the cell-sorted buffer with a stride gives spatially
+// scattered points that still land inside real sub-groups.
+[numthreads(256, 1, 1)]
+void SamplePositions(uint3 id : SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= _SampleCount) return;
+    uint idx = min(k * _SampleStride, _Count - 1u);
+    _Samples[k] = _SortedPos[idx];
 }

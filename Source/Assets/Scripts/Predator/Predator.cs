@@ -20,10 +20,15 @@ namespace FishSwarm.Predators
         public FishManager fishManager;
 
         [Header("Sensing")]
-        [Tooltip("Radius shown as a gizmo and used as the predator FSM detection range.")]
-        public float threatRadius = 14f;
+        [Tooltip("Radius shown as a gizmo and used as the predator FSM detection range. Keep this " +
+                 "ABOVE the fish predatorFleeRadius so the predator commits to a chase before the " +
+                 "fish scatter — that staging is what makes the pre-split ripple read on screen.")]
+        public float threatRadius = 22f;
         [Tooltip("Distance at which Chase becomes Lunge.")]
         public float lungeRange = 8f;
+        [Tooltip("Radius used to average the nearest fish cluster's centroid. Roughly one sub-group " +
+                 "wide, so the predator aims at a real cluster rather than the whole-school mean.")]
+        public float preyClusterRadius = 22f;
 
         [Header("Timing")]
         public float lungeDuration = 0.8f;
@@ -66,7 +71,9 @@ namespace FishSwarm.Predators
         {
             if (fishManager == null) fishManager = FindFirstObjectByType<FishManager>();
 
-            Vector3 preyTarget = fishManager != null ? fishManager.SchoolCenter : transform.position;
+            Vector3 preyTarget = fishManager != null
+                ? fishManager.ClusterTargetNear(transform.position, preyClusterRadius)
+                : transform.position;
             var input = new PredatorStateInputs
             {
                 HasPreyTarget = fishManager != null && fishManager.Count > 0,

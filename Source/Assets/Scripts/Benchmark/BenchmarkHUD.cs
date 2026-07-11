@@ -27,7 +27,7 @@ namespace FishSwarm.Benchmark
         Rect _configWin = new Rect(360, 10, 330, 470);
         bool _showConfig;
 
-        static readonly int[] Presets = { 100, 1000, 10000, 100000 };
+        static readonly int[] Presets = { 100, 1000, 10000, 100000, 1000000 };
 
         // Config snapshot captured at play start, for the Reset button.
         struct Snapshot

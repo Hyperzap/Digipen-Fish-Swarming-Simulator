@@ -47,10 +47,10 @@ namespace FishSwarm.Core
         [Tooltip("Colour per state: 0 Schooling, 1 Fleeing, 2 Regrouping, 3 Foraging.")]
         public Color[] stateColors =
         {
-            new Color(0.80f, 0.85f, 0.55f),
-            new Color(0.90f, 0.20f, 0.15f),
-            new Color(0.20f, 0.60f, 0.95f),
-            new Color(0.30f, 0.85f, 0.35f),
+            new Color(0.80f, 0.85f, 0.55f), // Schooling  — pale yellow-green
+            new Color(0.90f, 0.20f, 0.15f), // Fleeing    — red
+            new Color(0.20f, 0.60f, 0.95f), // Regrouping — blue
+            new Color(0.85f, 0.20f, 0.95f), // Foraging   — magenta (kept far from the schooling colour)
         };
 
         [Header("Simulation")]
@@ -130,6 +130,13 @@ namespace FishSwarm.Core
         readonly Stopwatch _steerTimer = new Stopwatch();
         double _lastSimMs, _lastSteerMs;
         Vector3 _schoolCenter;
+
+        // Spatial sample of fish positions (strided), refreshed each frame from whichever backend is
+        // active. Predators use it to target the nearest sub-group's centroid rather than the whole-
+        // school mean (which falls in the empty gap when the school splits).
+        const int SampleCount = 256;
+        readonly Vector3[] _sampleBuffer = new Vector3[SampleCount];
+        int _sampleN;
 
         int _pendingCount = -1;
 
@@ -406,6 +413,7 @@ namespace FishSwarm.Core
         }
 
         readonly Vector4[] _gpuPredators = new Vector4[16];
+        readonly Vector4[] _gpuNodes = new Vector4[16];
 
         void UpdateGpu()
         {
@@ -420,16 +428,32 @@ namespace FishSwarm.Core
                 _gpuPredators[i] = new Vector4(pp.x, pp.y, pp.z, 0f);
             }
 
+            // Snapshot foraging node positions for the GPU FSM's foraging pass.
+            var nodes = ForagingNode.All;
+            int nc = Mathf.Min(nodes.Count, _gpuNodes.Length);
+            for (int i = 0; i < nc; i++)
+            {
+                Vector3 np = nodes[i].transform.position;
+                _gpuNodes[i] = new Vector4(np.x, np.y, np.z, 0f);
+            }
+
             if (_camera == null) _camera = Camera.main;
             Vector3 camPos = _camera != null ? _camera.transform.position : bounds.Bounds.center;
 
             float dt = Time.deltaTime;
             _simTimer.Restart();
-            _gpu.Step(bounds.Bounds, config, dt, _gpuPredators, pc, camPos, useLod, Time.frameCount);
+            _gpu.Step(bounds.Bounds, config, dt, _gpuPredators, pc, _gpuNodes, nc, camPos, useLod, Time.frameCount);
             _simTimer.Stop();
             _lastSimMs = _simTimer.Elapsed.TotalMilliseconds;
             _lastSteerMs = 0;
             _schoolCenter = _gpu.SchoolCenter; // async GPU centroid reduction (1–2 frames latent)
+
+            // Mirror the GPU's async position sample into our CPU buffer so ClusterTargetNear works
+            // identically on both backends (also 1–2 frames latent, fine for a predator).
+            int gs = Mathf.Min(_gpu.SampleCount, _sampleBuffer.Length);
+            Vector3[] src = _gpu.Samples;
+            for (int i = 0; i < gs; i++) _sampleBuffer[i] = src[i];
+            _sampleN = gs;
 
             RenderGpu();
         }
@@ -648,22 +672,57 @@ namespace FishSwarm.Core
             if (UseGpuSim) { _schoolCenter = bounds.Bounds.center; return; } // CPU arrays are size-1 in GPU mode
             if (_count == 0)
             {
+                _sampleN = 0;
                 _schoolCenter = bounds != null ? bounds.Bounds.center : Vector3.zero;
                 return;
             }
 
-            const int maxSamples = 256;
-            int step = Mathf.Max(1, _count / maxSamples);
-            int samples = 0;
+            // One strided pass fills the position sample and its mean (the school centre). The sample
+            // doubles as the cluster-targeting source for predators.
+            int step = Mathf.Max(1, _count / SampleCount);
+            int n = 0;
             Vector3 sum = Vector3.zero;
-
-            for (int i = 0; i < _count; i += step)
+            for (int i = 0; i < _count && n < SampleCount; i += step)
             {
-                sum += (Vector3)_positions[i];
-                samples++;
+                Vector3 pos = (Vector3)_positions[i];
+                _sampleBuffer[n++] = pos;
+                sum += pos;
             }
 
-            _schoolCenter = samples > 0 ? sum / samples : (bounds != null ? bounds.Bounds.center : Vector3.zero);
+            _sampleN = n;
+            _schoolCenter = n > 0 ? sum / n : (bounds != null ? bounds.Bounds.center : Vector3.zero);
+        }
+
+        /// <summary>
+        /// Centroid of the fish sub-group nearest <paramref name="from"/>. Finds the sampled fish
+        /// closest to the query point, then averages all samples within <paramref name="radius"/> of
+        /// it — so a predator homes on one real cluster instead of the whole-school mean (which sits
+        /// in open water between the halves once the school splits). Falls back to the school centre
+        /// when no sample is available. Cheap: O(sample count) ≤ 256 per call.
+        /// </summary>
+        public Vector3 ClusterTargetNear(Vector3 from, float radius)
+        {
+            int n = _sampleN;
+            if (n <= 0) return _schoolCenter;
+
+            int nearest = 0;
+            float best = float.MaxValue;
+            for (int i = 0; i < n; i++)
+            {
+                float d = (_sampleBuffer[i] - from).sqrMagnitude;
+                if (d < best) { best = d; nearest = i; }
+            }
+
+            Vector3 anchor = _sampleBuffer[nearest];
+            float r2 = radius * radius;
+            Vector3 sum = Vector3.zero;
+            int m = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if ((_sampleBuffer[i] - anchor).sqrMagnitude <= r2) { sum += _sampleBuffer[i]; m++; }
+            }
+
+            return m > 0 ? sum / m : anchor;
         }
 
         void HandleInput()

@@ -18,28 +18,38 @@ namespace FishSwarm.Core
         const int UintStride = 4;
         const int GroupSize = 256;
         const int MaxPredators = 16;
+        const int MaxNodes = 16;         // foraging nodes uploaded to the GPU FSM
+        const int MaxSamples = 256;      // strided position sample read back for predator cluster targeting
 
         const int TableSize = 1 << 20;   // must match TABLE_SIZE in FishSim.compute
         const int ScanBlock = 1024;      // must match BLOCK in FishSim.compute
         const int NumBlocks = TableSize / ScanBlock; // 1024
 
         readonly ComputeShader _cs;
-        readonly int _kInit, _kClear, _kCount, _kScanBlocks, _kScanSums, _kAddOffsets, _kInitCursor, _kScatter, _kStep, _kReduce;
+        readonly int _kInit, _kClear, _kCount, _kScanBlocks, _kScanSums, _kAddOffsets, _kInitCursor, _kScatter, _kStep, _kReduce, _kSample;
 
         GraphicsBuffer _positions, _velocities, _sortedPos, _sortedVel, _instances;
         GraphicsBuffer _accel, _sortedAccel;
         GraphicsBuffer _cellCounts, _cellStart, _cellCursor, _blockSums, _blockOffsets;
-        GraphicsBuffer _predators, _partials;
+        GraphicsBuffer _predators, _nodes, _partials, _samples;
         readonly Vector4[] _predatorScratch = new Vector4[MaxPredators];
         int _count, _maxGroups;
 
         Vector3 _schoolCenter;
         bool _readbackPending, _disposed;
 
+        // Position sample, finished async on the CPU. _sampleData holds the latest read-back points;
+        // _sampleCount is how many are valid this frame.
+        readonly Vector3[] _sampleData = new Vector3[MaxSamples];
+        int _sampleCount;
+        bool _sampleReadbackPending;
+
         public GraphicsBuffer Instances => _instances;
         public int Count => _count;
         public bool IsAllocated => _instances != null;
         public Vector3 SchoolCenter => _schoolCenter;
+        public Vector3[] Samples => _sampleData;
+        public int SampleCount => _sampleCount;
 
         public FishGpuSimulator(ComputeShader cs)
         {
@@ -54,6 +64,7 @@ namespace FishSwarm.Core
             _kScatter = cs.FindKernel("Scatter");
             _kStep = cs.FindKernel("StepSorted");
             _kReduce = cs.FindKernel("ReducePositions");
+            _kSample = cs.FindKernel("SamplePositions");
         }
 
         public void Allocate(int count, Bounds bounds, FishConfig cfg, float spawnRadius, int seed)
@@ -80,7 +91,11 @@ namespace FishSwarm.Core
             _blockOffsets = Structured(NumBlocks, UintStride);
 
             _predators = Structured(MaxPredators, Float4Stride);
+            _nodes = Structured(MaxNodes, Float4Stride);
             _partials = Structured(_maxGroups, Float4Stride);
+            _samples = Structured(MaxSamples, Float4Stride);
+            _sampleCount = 0;
+            _sampleReadbackPending = false;
 
             SetParams(bounds, cfg);
             _cs.SetFloat("_SpawnRadius", spawnRadius);
@@ -90,7 +105,7 @@ namespace FishSwarm.Core
         }
 
         public void Step(Bounds bounds, FishConfig cfg, float dt, Vector4[] predators, int predatorCount,
-            Vector3 cameraPos, bool lodEnabled, int frame)
+            Vector4[] nodes, int nodeCount, Vector3 cameraPos, bool lodEnabled, int frame)
         {
             if (_count == 0) return;
             SetParams(bounds, cfg);
@@ -102,6 +117,10 @@ namespace FishSwarm.Core
             int pc = Mathf.Clamp(predatorCount, 0, MaxPredators);
             if (pc > 0) _predators.SetData(predators, 0, 0, pc);
             _cs.SetInt("_PredatorCount", pc);
+
+            int nc = Mathf.Clamp(nodeCount, 0, MaxNodes);
+            if (nc > 0) _nodes.SetData(nodes, 0, 0, nc);
+            _cs.SetInt("_NodeCount", nc);
 
             // 1) Clear + count agents per bucket.
             BindAll(_kClear);   Dispatch(_kClear, TableSize);
@@ -124,6 +143,14 @@ namespace FishSwarm.Core
             BindAll(_kReduce); _cs.Dispatch(_kReduce, Mathf.Max(1, groups), 1, 1);
             RequestCentroidReadback(groups);
 
+            // 6) Strided position sample (read back async for predator cluster targeting).
+            int sampleN = Mathf.Min(_count, MaxSamples);
+            int sampleStride = Mathf.Max(1, _count / MaxSamples);
+            _cs.SetInt("_SampleCount", sampleN);
+            _cs.SetInt("_SampleStride", sampleStride);
+            BindAll(_kSample); Dispatch(_kSample, sampleN);
+            RequestSampleReadback(sampleN);
+
             // Ping-pong: the sorted+moved buffers become current for next frame.
             (_positions, _sortedPos) = (_sortedPos, _positions);
             (_velocities, _sortedVel) = (_sortedVel, _velocities);
@@ -144,6 +171,22 @@ namespace FishSwarm.Core
                 int n = Mathf.Min(ng, data.Length);
                 for (int i = 0; i < n; i++) { Vector4 v = data[i]; sum.x += v.x; sum.y += v.y; sum.z += v.z; }
                 _schoolCenter = sum / cnt;
+            });
+        }
+
+        void RequestSampleReadback(int sampleN)
+        {
+            if (_sampleReadbackPending || _samples == null || sampleN <= 0) return;
+            _sampleReadbackPending = true;
+            int n = sampleN;
+            AsyncGPUReadback.Request(_samples, req =>
+            {
+                _sampleReadbackPending = false;
+                if (_disposed || req.hasError) return;
+                var data = req.GetData<Vector4>();
+                int m = Mathf.Min(n, data.Length);
+                for (int i = 0; i < m; i++) { Vector4 v = data[i]; _sampleData[i] = new Vector3(v.x, v.y, v.z); }
+                _sampleCount = m;
             });
         }
 
@@ -182,6 +225,14 @@ namespace FishSwarm.Core
             _cs.SetVector("_FleeingSAC", cfg.fleeingSAC);
             _cs.SetVector("_RegroupingSAC", cfg.regroupingSAC);
 
+            // Foraging (M4b). The trigger is a per-tick chance on the CPU; the GPU FSM runs every full
+            // frame, so scale it down by the behaviour-tick bucket count to keep the same overall rate.
+            _cs.SetVector("_ForagingSAC", cfg.foragingSAC);
+            _cs.SetFloat("_ForagingNodeRadiusSqr", cfg.foragingNodeRadius * cfg.foragingNodeRadius);
+            _cs.SetFloat("_ForagingChancePerFrame", cfg.foragingChancePerTick / Mathf.Max(1, cfg.behaviorTickBuckets));
+            _cs.SetFloat("_ForagingDuration", cfg.foragingDuration);
+            _cs.SetFloat("_ForagingWeight", cfg.foragingWeight);
+
             // LOD (M5). Runtime camera/frame/enable are set per-call in Step.
             _cs.SetFloat("_LodNearSqr", cfg.lodNearDistance * cfg.lodNearDistance);
             _cs.SetFloat("_LodMidSqr", cfg.lodMidDistance * cfg.lodMidDistance);
@@ -205,7 +256,9 @@ namespace FishSwarm.Core
             _cs.SetBuffer(kernel, "_BlockSums", _blockSums);
             _cs.SetBuffer(kernel, "_BlockOffsets", _blockOffsets);
             _cs.SetBuffer(kernel, "_Predators", _predators);
+            _cs.SetBuffer(kernel, "_Nodes", _nodes);
             _cs.SetBuffer(kernel, "_Partials", _partials);
+            _cs.SetBuffer(kernel, "_Samples", _samples);
         }
 
         void Dispatch(int kernel, int elements)
@@ -220,7 +273,8 @@ namespace FishSwarm.Core
         public void Release()
         {
             _disposed = true;
-            if (_readbackPending) AsyncGPUReadback.WaitAllRequests(); // flush before freeing _partials
+            // flush pending reads before freeing _partials / _samples
+            if (_readbackPending || _sampleReadbackPending) AsyncGPUReadback.WaitAllRequests();
 
             _positions?.Release(); _velocities?.Release();
             _sortedPos?.Release(); _sortedVel?.Release();
@@ -228,12 +282,12 @@ namespace FishSwarm.Core
             _instances?.Release();
             _cellCounts?.Release(); _cellStart?.Release(); _cellCursor?.Release();
             _blockSums?.Release(); _blockOffsets?.Release();
-            _predators?.Release(); _partials?.Release();
+            _predators?.Release(); _nodes?.Release(); _partials?.Release(); _samples?.Release();
 
             _positions = _velocities = _sortedPos = _sortedVel = _instances = null;
             _accel = _sortedAccel = null;
             _cellCounts = _cellStart = _cellCursor = _blockSums = _blockOffsets = null;
-            _predators = _partials = null;
+            _predators = _nodes = _partials = _samples = null;
             _count = 0;
         }
     }
