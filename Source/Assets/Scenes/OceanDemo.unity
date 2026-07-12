@@ -163,7 +163,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30021, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  size: {x: 600, y: 300, z: 600}
+  size: {x: 1000, y: 600, z: 1000}
   gizmoColor: {r: 0.2, g: 0.6, b: 1, a: 0.5}
 --- !u!1 &100020000
 GameObject:
@@ -214,7 +214,6 @@ MonoBehaviour:
   bounds: {fileID: 100010002}
   spawnCount: 100
   randomSeed: 12345
-  spawnRadius: 10
   fishMaterial: {fileID: 2100000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30043, type: 2}
   fishShader: {fileID: 4800000, guid: 933532a4fcc9baf4fa0491de14d08ed7, type: 3}
   indirectShader: {fileID: 4800000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f300a1, type: 3}
