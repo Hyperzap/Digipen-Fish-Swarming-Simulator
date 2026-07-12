@@ -170,6 +170,10 @@ namespace FishSwarm.Benchmark
             GUILayout.EndHorizontal();
 
             GUILayout.Space(6);
+            GUILayout.Label("<b>Weights</b>", _label);
+            c.spawnRadius = Slider("Spawn Radius", c.spawnRadius, 10f, 150f);
+
+            GUILayout.Space(6);
             GUILayout.Label("<b>Simulation</b>", _label);
             GUILayout.BeginHorizontal();
             if (GUILayout.Button(fishManager.UseBurst ? "Burst: ON" : "Burst: OFF"))

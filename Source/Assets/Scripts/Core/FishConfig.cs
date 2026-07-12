@@ -19,6 +19,9 @@ namespace FishSwarm.Core
         [Tooltip("Rear blind cone in degrees for alignment/cohesion only. 0 = disabled, 35 = subtle, 60 = strong, 90 = ignore the full rear hemisphere. Separation still works in every direction.")]
         [Range(0f, 179f)] public float rearBlindAngle = 35f;
 
+        [Tooltip("Fish spawn within this radius of the volume centre so they start as one school.")]
+        [Range(0f, 179f)] public float spawnRadius = 50f;
+
         [Header("Steering weights")]
         public float separationWeight = 1.6f;
         public float alignmentWeight = 1.0f;

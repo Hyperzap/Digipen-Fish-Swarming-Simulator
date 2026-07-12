@@ -31,8 +31,6 @@ namespace FishSwarm.Core
         [Header("Population")]
         [Min(0)] public int spawnCount = 3000;
         public int randomSeed = 12345;
-        [Tooltip("Fish spawn within this radius of the volume centre so they start as one school.")]
-        public float spawnRadius = 20f;
 
         [Header("Fish appearance")]
         [Tooltip("Fish material asset (URP/Lit with GPU Instancing enabled) — keeps the instancing " +
@@ -242,7 +240,7 @@ namespace FishSwarm.Core
             if (_indirectMaterial != null) _indirectMaterial.SetBuffer("_Instances", _instanceBuffer);
 
             // GPU backend owns its own (full-size) buffers and seeds them on the GPU.
-            if (gpu) _gpu.Allocate(_count, bounds.Bounds, config, spawnRadius, randomSeed);
+            if (gpu) _gpu.Allocate(_count, bounds.Bounds, config, config.spawnRadius, randomSeed);
             else _gpu?.Release();
 
             _allocated = true;
@@ -259,8 +257,8 @@ namespace FishSwarm.Core
             Vector3 centre = bounds.Bounds.center;
             for (int i = 0; i < _count; i++)
             {
-                Vector3 pos = spawnRadius > 0f
-                    ? bounds.Clamp(centre + Random.insideUnitSphere * spawnRadius)
+                Vector3 pos = config.spawnRadius > 0f
+                    ? bounds.Clamp(centre + Random.insideUnitSphere * config.spawnRadius)
                     : bounds.RandomPointInside();
                 _positions[i] = pos;
                 _velocities[i] = (float3)(Random.onUnitSphere * startSpeed);

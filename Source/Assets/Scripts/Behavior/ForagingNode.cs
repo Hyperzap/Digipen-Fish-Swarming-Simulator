@@ -18,7 +18,7 @@ namespace FishSwarm.Behavior
         void OnDrawGizmos()
         {
             Gizmos.color = new Color(0.3f, 0.85f, 0.35f, 0.7f);
-            Gizmos.DrawWireSphere(transform.position, 1.5f);
+            Gizmos.DrawWireSphere(transform.position, 15f);
         }
     }
 }

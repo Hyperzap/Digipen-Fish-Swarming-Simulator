@@ -15,6 +15,7 @@ MonoBehaviour:
   perceptionRadius: 6
   separationRadius: 2
   rearBlindAngle: 90
+  spawnRadius: 50
   separationWeight: 1.6
   alignmentWeight: 1
   cohesionWeight: 1
@@ -35,7 +36,7 @@ MonoBehaviour:
   predatorFleeRadius: 16
   threatWeight: 5
   regroupNeighborDistance: 4
-  foragingNodeRadius: 8
+  foragingNodeRadius: 15
   foragingChancePerTick: 0.02
   foragingDuration: 4
   foragingWeight: 1.5
