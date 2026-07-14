@@ -31,14 +31,24 @@ public class CameraController : MonoBehaviour
 
     [Header("Input")]
     public Key predatorViewKey = Key.F;
+    [Tooltip("Selects the previous predator while predator view is active.")]
+    public Key previousPredatorKey = Key.A;
+    [Tooltip("Selects the next predator while predator view is active.")]
+    public Key nextPredatorKey = Key.D;
+
+    [Header("Predator view HUD")]
+    [Tooltip("Shows the selected predator number and its current state.")]
+    public bool showPredatorSelectionHud = true;
 
     float _yaw;
     float _pitch;
     bool _predatorView;
+    Predator _selectedPredator;
     Vector3 _lastPredatorPosition;
     Vector3 _predatorForward = Vector3.forward;
     bool _hasPredatorHistory;
     bool _ignoreFirstMouseDelta;
+    GUIStyle _predatorHudStyle;
 
     void Start()
     {
@@ -53,12 +63,22 @@ public class CameraController : MonoBehaviour
     {
         // Input toggles are read in Update so single-frame key presses are not missed.
         Keyboard kb = Keyboard.current;
+        if (kb == null) return;
 
-        if (kb != null && kb[Key.Escape].wasPressedThisFrame)
+        if (kb[Key.Escape].wasPressedThisFrame)
             Application.Quit();
 
-        if (kb != null && kb[predatorViewKey].wasPressedThisFrame)
+        if (kb[predatorViewKey].wasPressedThisFrame)
             TogglePredatorView();
+
+        // A/D remain free-camera strafe controls outside predator view.
+        if (_predatorView)
+        {
+            if (kb[previousPredatorKey].wasPressedThisFrame)
+                CyclePredator(-1);
+            else if (kb[nextPredatorKey].wasPressedThisFrame)
+                CyclePredator(1);
+        }
     }
 
     void LateUpdate()
@@ -171,14 +191,89 @@ public class CameraController : MonoBehaviour
 
     Predator CurrentPredator()
     {
-        return Predator.All.Count > 0 ? Predator.All[0] : null;
+        if (Predator.All.Count == 0)
+        {
+            _selectedPredator = null;
+            return null;
+        }
+
+        // Preserve the last selection across view toggles. If that predator was removed,
+        // gracefully fall back to the first currently active predator.
+        if (_selectedPredator == null || !Predator.All.Contains(_selectedPredator))
+            _selectedPredator = Predator.All[0];
+
+        return _selectedPredator;
     }
 
     void TogglePredatorView()
     {
-        _predatorView = !_predatorView;
-        _hasPredatorHistory = false;
+        if (_predatorView)
+        {
+            _predatorView = false;
+        }
+        else
+        {
+            // Do not enter a view with no valid follow target.
+            if (CurrentPredator() == null) return;
+            _predatorView = true;
+        }
+
+        ResetPredatorTracking();
         SyncAnglesFromTransform();
+    }
+
+    void CyclePredator(int direction)
+    {
+        int count = Predator.All.Count;
+        if (count == 0)
+        {
+            _selectedPredator = null;
+            _predatorView = false;
+            return;
+        }
+
+        Predator current = CurrentPredator();
+        int index = Predator.All.IndexOf(current);
+        index = (index + direction + count) % count;
+        _selectedPredator = Predator.All[index];
+
+        // Clear motion history so the new predator does not inherit the previous one's heading.
+        ResetPredatorTracking();
+    }
+
+    void ResetPredatorTracking()
+    {
+        _hasPredatorHistory = false;
+        if (_selectedPredator == null) return;
+
+        _lastPredatorPosition = _selectedPredator.transform.position;
+        Vector3 forward = _selectedPredator.transform.forward;
+        _predatorForward = forward.sqrMagnitude > 1e-6f ? forward.normalized : Vector3.forward;
+    }
+
+    void OnGUI()
+    {
+        if (!_predatorView || !showPredatorSelectionHud) return;
+
+        Predator predator = CurrentPredator();
+        int index = predator != null ? Predator.All.IndexOf(predator) : -1;
+        if (index < 0) return;
+
+        if (_predatorHudStyle == null)
+        {
+            _predatorHudStyle = new GUIStyle(GUI.skin.box)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = 16,
+                fontStyle = FontStyle.Bold,
+            };
+        }
+
+        const float width = 300f;
+        Rect rect = new Rect((Screen.width - width) * 0.5f, 16f, width, 34f);
+        GUI.Box(rect,
+            $"Predator {index + 1} / {Predator.All.Count}  •  {predator.state}  [A / D]",
+            _predatorHudStyle);
     }
 
     Vector3 PredatorForward(Vector3 currentPosition)

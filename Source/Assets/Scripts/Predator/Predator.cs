@@ -24,6 +24,9 @@ namespace FishSwarm.Predators
                  "ABOVE the fish predatorFleeRadius so the predator commits to a chase before the " +
                  "fish scatter — that staging is what makes the pre-split ripple read on screen.")]
         public float threatRadius = 22f;
+        [Tooltip("Distance at which an existing Chase gives up. Keep this above threatRadius to " +
+                 "prevent rapid Patrol/Chase switching near the detection boundary.")]
+        public float loseSightRadius = 30f;
         [Tooltip("Distance at which Chase becomes Lunge.")]
         public float lungeRange = 8f;
         [Tooltip("Radius used to average the nearest fish cluster's centroid. Roughly one sub-group " +
@@ -116,6 +119,7 @@ namespace FishSwarm.Predators
             var settings = new PredatorStateSettings
             {
                 DetectionRadius = threatRadius,
+                LoseSightRadius = Mathf.Max(threatRadius, loseSightRadius),
                 LungeRange = lungeRange,
                 LungeDuration = lungeDuration,
                 RecoverDuration = recoverDuration,
@@ -282,6 +286,10 @@ namespace FishSwarm.Predators
         {
             Gizmos.color = new Color(1f, 0.2f, 0.15f, 0.5f);
             Gizmos.DrawWireSphere(transform.position, threatRadius);
+
+            // The wider, fainter ring visualises the hysteresis used to retain a chase.
+            Gizmos.color = new Color(1f, 0.2f, 0.15f, 0.2f);
+            Gizmos.DrawWireSphere(transform.position, Mathf.Max(threatRadius, loseSightRadius));
 
             Gizmos.color = new Color(1f, 0.8f, 0.1f, 0.5f);
             Gizmos.DrawWireSphere(transform.position, lungeRange);

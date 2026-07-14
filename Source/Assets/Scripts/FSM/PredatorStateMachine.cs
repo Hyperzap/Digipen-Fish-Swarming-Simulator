@@ -11,6 +11,7 @@ namespace FishSwarm.FSM
     public struct PredatorStateSettings
     {
         public float DetectionRadius;
+        public float LoseSightRadius;
         public float LungeRange;
         public float LungeDuration;
         public float RecoverDuration;
@@ -40,12 +41,15 @@ namespace FishSwarm.FSM
                 case PredatorState.Recover:
                     if (stateTimer < settings.RecoverDuration)
                         return PredatorState.Recover;
-                    return CanSeePrey(input, settings)
+                    return CanAcquirePrey(input, settings)
                         ? Enter(current, PredatorState.Chase, ref stateTimer)
                         : Enter(current, PredatorState.Patrol, ref stateTimer);
 
                 case PredatorState.Chase:
-                    if (!CanSeePrey(input, settings))
+                    // Retain an established chase across a wider radius than the acquisition
+                    // threshold. This hysteresis prevents noisy target samples from causing
+                    // rapid Chase/Patrol transitions at the edge of perception.
+                    if (!CanKeepPrey(input, settings))
                         return Enter(current, PredatorState.Patrol, ref stateTimer);
                     if (input.DistanceToPrey <= settings.LungeRange)
                         return Enter(current, PredatorState.Lunge, ref stateTimer);
@@ -53,15 +57,20 @@ namespace FishSwarm.FSM
 
                 case PredatorState.Patrol:
                 default:
-                    return CanSeePrey(input, settings)
+                    return CanAcquirePrey(input, settings)
                         ? Enter(current, PredatorState.Chase, ref stateTimer)
                         : PredatorState.Patrol;
             }
         }
 
-        static bool CanSeePrey(PredatorStateInputs input, PredatorStateSettings settings)
+        static bool CanAcquirePrey(PredatorStateInputs input, PredatorStateSettings settings)
         {
             return input.HasPreyTarget && input.DistanceToPrey <= settings.DetectionRadius;
+        }
+
+        static bool CanKeepPrey(PredatorStateInputs input, PredatorStateSettings settings)
+        {
+            return input.HasPreyTarget && input.DistanceToPrey <= settings.LoseSightRadius;
         }
 
         static PredatorState Enter(PredatorState current, PredatorState next, ref float stateTimer)
