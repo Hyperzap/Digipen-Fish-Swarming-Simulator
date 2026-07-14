@@ -53,6 +53,10 @@ public class CameraController : MonoBehaviour
     {
         // Input toggles are read in Update so single-frame key presses are not missed.
         Keyboard kb = Keyboard.current;
+
+        if (kb != null && kb[Key.Escape].wasPressedThisFrame)
+            Application.Quit();
+
         if (kb != null && kb[predatorViewKey].wasPressedThisFrame)
             TogglePredatorView();
     }
