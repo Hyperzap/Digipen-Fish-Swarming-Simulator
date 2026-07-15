@@ -17,7 +17,7 @@ RenderSettings:
   m_Fog: 1
   m_FogColor: {r: 0.05, g: 0.22, b: 0.35, a: 1}
   m_FogMode: 3
-  m_FogDensity: 0.012
+  m_FogDensity: 0.004
   m_LinearFogStart: 0
   m_LinearFogEnd: 300
   m_AmbientSkyColor: {r: 0.08, g: 0.2, b: 0.3, a: 1}
@@ -217,7 +217,7 @@ MonoBehaviour:
   fishMaterial: {fileID: 2100000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f30043, type: 2}
   fishShader: {fileID: 4800000, guid: 933532a4fcc9baf4fa0491de14d08ed7, type: 3}
   indirectShader: {fileID: 4800000, guid: 3a7c1e9b45d24f08a1b6c9d0e2f300a1, type: 3}
-  fishScale: {x: 0.25, y: 0.25, z: 0.7}
+  fishScale: {x: 0.5, y: 0.5, z: 1.1}
   stateColors:
   - {r: 0.8, g: 0.85, b: 0.55, a: 1}
   - {r: 0.9, g: 0.2, b: 0.15, a: 1}

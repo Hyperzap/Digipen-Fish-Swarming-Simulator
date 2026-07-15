@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
 using FishSwarm.Core;
+using FishSwarm.Predators;
 
 namespace FishSwarm.Benchmark
 {
@@ -26,6 +27,8 @@ namespace FishSwarm.Benchmark
         Rect _statsWin = new Rect(10, 10, 360, 300);
         Rect _configWin = new Rect(360, 10, 330, 470);
         bool _showConfig;
+        int _configTab; // 0 = Fish, 1 = Predators
+        static readonly string[] ConfigTabs = { "Fish", "Predators" };
 
         static readonly int[] Presets = { 100, 1000, 10000, 100000, 1000000 };
 
@@ -112,7 +115,12 @@ namespace FishSwarm.Benchmark
 
             _statsWin = GUILayout.Window(9001, _statsWin, DrawStatsWindow, "Benchmark   [C to toggle Config Menu]");
             if (_showConfig)
+            {
+                // GUILayout.Window grows to fit content but won't shrink below the rect passed in, so
+                // zero the height each frame to let it re-fit when switching to a shorter tab.
+                _configWin.height = 0;
                 _configWin = GUILayout.Window(9002, _configWin, DrawConfigWindow, "Config");
+            }
         }
 
         void DrawStatsWindow(int id)
@@ -160,6 +168,17 @@ namespace FishSwarm.Benchmark
 
         void DrawConfigWindow(int id)
         {
+            _configTab = GUILayout.Toolbar(_configTab, ConfigTabs);
+            GUILayout.Space(4);
+
+            if (_configTab == 1) DrawPredatorTab();
+            else DrawFishTab();
+
+            GUI.DragWindow(new Rect(0, 0, 10000, 20));
+        }
+
+        void DrawFishTab()
+        {
             FishConfig c = fishManager.Config;
 
             GUILayout.Label("<b>Fish count</b>  (respawns the school)", _label);
@@ -170,7 +189,7 @@ namespace FishSwarm.Benchmark
             GUILayout.EndHorizontal();
 
             GUILayout.Space(6);
-            GUILayout.Label("<b>Weights</b>", _label);
+            GUILayout.Label("<b>Spawn</b>", _label);
             c.spawnRadius = Slider("Spawn Radius", c.spawnRadius, 10f, 150f);
 
             GUILayout.Space(6);
@@ -220,8 +239,39 @@ namespace FishSwarm.Benchmark
                 if (GUILayout.Button("Reset weights to start-of-sim"))
                     ApplySnapshot();
             }
+        }
 
-            GUI.DragWindow(new Rect(0, 0, 10000, 20));
+        // Predator parameters live on the scene Predator components (not FishConfig). We read the
+        // displayed value from the first predator and write every slider back to ALL of them, so the
+        // menu tunes the whole pack at once. Play-mode edits to scene objects never touch disk.
+        void DrawPredatorTab()
+        {
+            var preds = Predator.All;
+            if (preds.Count == 0)
+            {
+                GUILayout.Label("<size=11>(no predators in the scene)</size>", _label);
+                return;
+            }
+
+            Predator p0 = preds[0];
+            float threat = Slider("Threat radius", p0.threatRadius, 4f, 60f);
+            float cooldown = Slider("Patrol cooldown", p0.patrolCooldownDuration, 0f, 20f);
+            float pNoise = Slider("Patrol noise", p0.patrolNoise, 0f, 1.5f);
+            float cNoise = Slider("Chase noise", p0.chaseNoise, 0f, 1.5f);
+            float rNoise = Slider("Recover noise", p0.recoverNoise, 0f, 1.5f);
+            float nFreq = Slider("Noise freq", p0.noiseFrequency, 0.05f, 3f);
+
+            for (int i = 0; i < preds.Count; i++)
+            {
+                Predator pr = preds[i];
+                if (pr == null) continue;
+                pr.threatRadius = threat;
+                pr.patrolCooldownDuration = cooldown;
+                pr.patrolNoise = pNoise;
+                pr.chaseNoise = cNoise;
+                pr.recoverNoise = rNoise;
+                pr.noiseFrequency = nFreq;
+            }
         }
 
         float Slider(string label, float val, float min, float max)

@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
+using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
@@ -41,7 +42,7 @@ namespace FishSwarm.Core
         [Tooltip("Custom shader for the GPU-indirect path (FishSwarm/FishIndirect). Reads per-instance " +
                  "data from a StructuredBuffer and builds the transform on the GPU.")]
         public Shader indirectShader;
-        public Vector3 fishScale = new Vector3(0.25f, 0.25f, 0.7f);
+        public Vector3 fishScale = new Vector3(0.5f, 0.5f, 1.1f);
         [Tooltip("Colour per state: 0 Schooling, 1 Fleeing, 2 Regrouping, 3 Foraging.")]
         public Color[] stateColors =
         {
@@ -306,11 +307,74 @@ namespace FishSwarm.Core
 
         // ---- Rendering resources ------------------------------------------------------------
 
+        // A low-poly fish built in code: a lathed spindle body (a few elliptical cross-section rings
+        // from nose at +Z to tail at -Z, laterally compressed like a real fish) capped by a nose and
+        // tail point, plus a double-sided vertical caudal fin. Smooth-shaded via RecalculateNormals so
+        // it reads as round. ~30 verts / 50 tris — still tiny per instance, scales to a million fish.
+        // +Z is forward to match the render shaders. Tune overall size with fishScale.
+        static Mesh BuildFishMesh()
+        {
+            const int seg = 8;                 // radial segments per ring — higher = rounder body
+            // Cross-section rings: z along the body, half-width (X) and half-height (Y). Height > width
+            // gives the lateral compression; the middle ring is the belly bulge.
+            float[] rz = {  0.30f,  0.02f, -0.30f };
+            float[] rx = {  0.06f,  0.14f,  0.06f };
+            float[] ry = {  0.10f,  0.21f,  0.11f };
+
+            var verts = new List<Vector3>();
+            var tris = new List<int>();
+
+            int nose = verts.Count; verts.Add(new Vector3(0f, 0f, 0.55f));
+            var ringStart = new int[rz.Length];
+            for (int i = 0; i < rz.Length; i++)
+            {
+                ringStart[i] = verts.Count;
+                for (int k = 0; k < seg; k++)
+                {
+                    float a = 2f * Mathf.PI * k / seg;
+                    verts.Add(new Vector3(rx[i] * Mathf.Cos(a), ry[i] * Mathf.Sin(a), rz[i]));
+                }
+            }
+            int tail = verts.Count; verts.Add(new Vector3(0f, 0f, -0.45f));
+
+            for (int k = 0; k < seg; k++) // nose fan
+            {
+                int a = ringStart[0] + k, b = ringStart[0] + (k + 1) % seg;
+                tris.Add(nose); tris.Add(a); tris.Add(b);
+            }
+            for (int i = 0; i < rz.Length - 1; i++) // body rings
+                for (int k = 0; k < seg; k++)
+                {
+                    int a = ringStart[i] + k,     b = ringStart[i] + (k + 1) % seg;
+                    int d = ringStart[i + 1] + k, c = ringStart[i + 1] + (k + 1) % seg;
+                    tris.Add(a); tris.Add(d); tris.Add(b);
+                    tris.Add(b); tris.Add(d); tris.Add(c);
+                }
+            for (int k = 0; k < seg; k++) // tail fan
+            {
+                int a = ringStart[rz.Length - 1] + k, b = ringStart[rz.Length - 1] + (k + 1) % seg;
+                tris.Add(tail); tris.Add(b); tris.Add(a);
+            }
+
+            // Double-sided vertical caudal fin behind the tail base (dup verts so normals don't cancel).
+            int fTop = verts.Count; verts.Add(new Vector3(0f, 0.34f, -0.70f));
+            int fBot = verts.Count; verts.Add(new Vector3(0f, -0.34f, -0.70f));
+            int fBot2 = verts.Count; verts.Add(new Vector3(0f, -0.34f, -0.70f));
+            int fTop2 = verts.Count; verts.Add(new Vector3(0f, 0.34f, -0.70f));
+            tris.Add(tail); tris.Add(fTop); tris.Add(fBot);
+            tris.Add(tail); tris.Add(fBot2); tris.Add(fTop2);
+
+            var mesh = new Mesh { name = "Fish (procedural)" };
+            mesh.SetVertices(verts);
+            mesh.SetTriangles(tris, 0);
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
         void BuildRenderResources()
         {
-            var temp = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            _fishMesh = temp.GetComponent<MeshFilter>().sharedMesh;
-            Destroy(temp);
+            _fishMesh = BuildFishMesh();
 
             Material baseMat = fishMaterial;
             bool tempBase = false;
@@ -746,6 +810,7 @@ namespace FishSwarm.Core
             _instanceBuffer?.Release();
             _argsBuffer?.Release();
             if (_indirectMaterial != null) Destroy(_indirectMaterial);
+            if (_fishMesh != null) Destroy(_fishMesh); // procedural, owned by us
             _gpu?.Release();
         }
     }
