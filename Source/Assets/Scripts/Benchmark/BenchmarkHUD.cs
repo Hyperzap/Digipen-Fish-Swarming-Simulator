@@ -110,9 +110,9 @@ namespace FishSwarm.Benchmark
             if (fishManager == null) return;
             if (_label == null) _label = new GUIStyle(GUI.skin.label) { richText = true };
 
-            _statsWin = GUILayout.Window(9001, _statsWin, DrawStatsWindow, "Benchmark");
+            _statsWin = GUILayout.Window(9001, _statsWin, DrawStatsWindow, "Benchmark   [C to toggle Config Menu]");
             if (_showConfig)
-                _configWin = GUILayout.Window(9002, _configWin, DrawConfigWindow, "Config  [C to hide]");
+                _configWin = GUILayout.Window(9002, _configWin, DrawConfigWindow, "Config");
         }
 
         void DrawStatsWindow(int id)
