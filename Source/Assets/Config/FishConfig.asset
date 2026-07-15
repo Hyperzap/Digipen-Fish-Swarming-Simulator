@@ -36,7 +36,7 @@ MonoBehaviour:
   predatorFleeRadius: 16
   threatWeight: 5
   regroupNeighborDistance: 4
-  foragingNodeRadius: 15
+  foragingNodeRadius: 50
   foragingChancePerTick: 0.02
   foragingDuration: 4
   foragingWeight: 1.5
